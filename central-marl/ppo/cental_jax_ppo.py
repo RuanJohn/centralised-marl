@@ -44,12 +44,14 @@ NUM_EPOCHS = 2 #3
 NUM_MINIBATCHES = 4 #8 
 MAX_GLOBAL_NORM = 0.5
 ADAM_EPS = 1e-5
-ENV_NAME = "CartPole-v0" #"ma_gym:Switch4-v0"
-# ENV_NAME = "CartPole-v0"
+# ENV_NAME = "ma_gym:Switch4-v0"
+ENV_NAME = "CartPole-v0"
 MASTER_PRNGKEY = jax.random.PRNGKey(2022)
 MASTER_PRNGKEY, networks_key, actors_key, buffer_key = jax.random.split(MASTER_PRNGKEY, 4)
 
 env = gym.make(ENV_NAME)
+
+# Uncomment for centralised marl envs. 
 # env = CentralControllerWrapper(env)
 
 observation_dim = env.observation_space.shape[0]
@@ -92,9 +94,6 @@ network_params = NetworkParams(
 )
 
 # Create optimisers and states
-# policy_optimiser = optax.adam(POLICY_LR)
-# critic_optimiser = optax.adam(CRITIC_LR)
-
 policy_optimiser = optax.chain(
       optax.clip_by_global_norm(MAX_GLOBAL_NORM),
       optax.adam(learning_rate = POLICY_LR, eps = ADAM_EPS),
@@ -131,33 +130,9 @@ system_state = PPOSystemState(
     optimiser_states=optimiser_states, 
 ) 
 
-# @jax.jit
-# @chex.assert_max_traces(n=1)
-def choose_action(
-    system_state: PPOSystemState, 
-    observation,
-    ):
-
-    policy_params = system_state.network_params.policy_params
-    
-    actors_key = system_state.actors_key
-    actors_key, sample_key = jax.random.split(actors_key)
-    system_state.actors_key = actors_key
-
-    logits = policy_network.apply(policy_params, observation)
-
-    dist = distrax.Categorical(logits=logits)
-
-    action, logprob = dist.sample_and_log_prob(
-        seed = sample_key, 
-    )
-    entropy = dist.entropy()
-
-    return system_state, action, logprob, entropy
-
 @jax.jit
 @chex.assert_max_traces(n=1)
-def choose_action2(
+def choose_action(
     logits,  
     actors_key,
     ):
@@ -172,20 +147,6 @@ def choose_action2(
     entropy = dist.entropy()
 
     return actors_key, action, logprob, entropy
-
-# @jax.jit
-# @chex.assert_max_traces(n=1)
-def get_value(
-    system_state: PPOSystemState, 
-    observation) -> jnp.ndarray:
-
-    critic_params = system_state.network_params.critic_params
-
-    value = critic_network.apply(critic_params, observation)
-
-    return jnp.squeeze(value)
-
-# Not doing minibatches yet. 
 
 def policy_loss(
     policy_params, 
@@ -207,12 +168,8 @@ def policy_loss(
     loss_term_2 = -advantages * jnp.clip(ratio, 1 - CLIP_EPSILON, 1 + CLIP_EPSILON)
     loss = jnp.maximum(loss_term_1, loss_term_2).mean()
 
-    # jax.debug.print("policy_loss {x}", x=loss)
-
     return loss
 
-# @jax.jit
-# @chex.assert_max_traces(n=1)
 def critic_loss(
     critic_params, 
     states, 
@@ -222,7 +179,6 @@ def critic_loss(
     new_values = jnp.squeeze(critic_network.apply(critic_params, states))
     
     loss = 0.5 * ((new_values - returns) ** 2).mean()
-    # jax.debug.print("critic_loss {x}", x=loss)
 
     return loss
 
@@ -290,16 +246,13 @@ while global_step < 50_000:
     obs = env.reset()
     episode_return = 0
     while not done: 
-
-        # system_state, action, logprob, entropy = choose_action(system_state, obs)
         
         logits = policy_network.apply(system_state.network_params.policy_params, obs)
         
         actors_key = system_state.actors_key
-        actors_key, action, logprob, entropy = choose_action2(logits, actors_key)
+        actors_key, action, logprob, entropy = choose_action(logits, actors_key)
         system_state.actors_key = actors_key
 
-        # value = get_value(system_state, obs)
         value = jnp.squeeze(critic_network.apply(system_state.network_params.critic_params, obs))
         # Covert action to int in order to step the env. 
         # Can also handle in the wrapper
