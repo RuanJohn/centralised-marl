@@ -40,19 +40,19 @@ POLICY_LR = 0.005
 CRITIC_LR = 0.005
 DISCOUNT_GAMMA = 0.99 
 GAE_LAMBDA = 0.95
-NUM_EPOCHS = 2 #3
-NUM_MINIBATCHES = 4 #8 
+NUM_EPOCHS = 3
+NUM_MINIBATCHES = 8 
 MAX_GLOBAL_NORM = 0.5
 ADAM_EPS = 1e-5
-# ENV_NAME = "ma_gym:Switch4-v0"
-ENV_NAME = "CartPole-v0"
+ENV_NAME = "ma_gym:Checkers-v0"
+# ENV_NAME = "CartPole-v0"
 MASTER_PRNGKEY = jax.random.PRNGKey(2022)
 MASTER_PRNGKEY, networks_key, actors_key, buffer_key = jax.random.split(MASTER_PRNGKEY, 4)
 
 env = gym.make(ENV_NAME)
 
 # Uncomment for centralised marl envs. 
-# env = CentralControllerWrapper(env)
+env = CentralControllerWrapper(env)
 
 observation_dim = env.observation_space.shape[0]
 num_actions = env.action_space.n

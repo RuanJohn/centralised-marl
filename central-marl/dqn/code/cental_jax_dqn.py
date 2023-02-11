@@ -1,4 +1,4 @@
-"""Multi-agent JAX PPO with enumerated centralised controller.
+"""Multi-agent JAX DQN with enumerated centralised controller.
    Essentially centralised training with centralised execution. 
 """
 
@@ -213,9 +213,9 @@ def dqn_loss(
     
     return loss
 
-# @jax.jit
-# @chex.assert_max_traces(n=1)
-def update_policy(system_state: DQNSystemState, sampled_batch: DQNBufferData,): 
+@jax.jit
+@chex.assert_max_traces(n=1)
+def update_policy(system_state: DQNSystemState, sampled_batch: DQNBufferData, global_step: int): 
 
     states = jnp.squeeze(sampled_batch.state)
     actions = jnp.squeeze(sampled_batch.action)
@@ -226,6 +226,10 @@ def update_policy(system_state: DQNSystemState, sampled_batch: DQNBufferData,):
     policy_optimiser_state = system_state.optimiser_states.policy_state
     policy_params = system_state.network_params.policy_params
     target_policy_params = system_state.network_params.target_policy_params
+
+    target_policy_params = optax.periodic_update(
+            policy_params, target_policy_params, global_step, TARGET_UPDATE_PERIOD
+        )
     
     grads = jax.grad(dqn_loss)(
         policy_params, 
@@ -242,6 +246,7 @@ def update_policy(system_state: DQNSystemState, sampled_batch: DQNBufferData,):
 
     system_state.optimiser_states.policy_state = new_policy_optimiser_state
     system_state.network_params.policy_params = new_policy_params
+    system_state.network_params.target_policy_params = target_policy_params
 
     return system_state
 
@@ -291,7 +296,7 @@ while global_step < 50_000:
             buffer_state = system_state.buffer
             buffer_state, sampled_data = sample_batch(buffer_state)
             system_state.buffer = buffer_state
-            system_state = update_policy(system_state, sampled_data)
+            system_state = update_policy(system_state, sampled_data, global_step)
 
     
     episode += 1
