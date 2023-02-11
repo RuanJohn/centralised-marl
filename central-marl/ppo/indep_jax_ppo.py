@@ -1,0 +1,1 @@
+"""Independent multi-agent JAX PPO."""
