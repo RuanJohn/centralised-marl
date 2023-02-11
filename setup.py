@@ -26,6 +26,8 @@ setup(
         "jaxlib==0.4.1",
         "dm-haiku==0.0.9",
         "distrax==0.1.2",
+        "optax==0.1.4", 
+        "rlax==0.1.5",
     ],
     extras_require={
         "cleanrl": cleanrl_requirements,
