@@ -37,7 +37,7 @@ import gym
 # Constants: 
 MAX_REPLAY_SIZE = 200_000
 MIN_REPLAY_SIZE = 1_000
-BATCH_SIZE = 64
+BATCH_SIZE = 128
 TARGET_UPDATE_PERIOD = 500
 TRAIN_EVERY = 20
 POLICY_LR = 0.005
@@ -46,8 +46,8 @@ MAX_GLOBAL_NORM = 0.5
 EPSILON = 1.0 
 MIN_EPSILON = 0.05 
 EPSILON_DECAY_STEPS = 10_000
-EPSILON_DECAY_RATE = 0.9995
-# ENV_NAME = "ma_gym:Switch4-v0"
+EPSILON_DECAY_RATE = 0.9999
+# ENV_NAME = "ma_gym:Switch2-v0"
 ENV_NAME = "CartPole-v0"
 
 MASTER_PRNGKEY = jax.random.PRNGKey(2022)
@@ -59,19 +59,13 @@ env = gym.make(ENV_NAME)
 observation_dim = env.observation_space.shape[0]
 num_actions = env.action_space.n
 
-def decay_epsilon(epsilon): 
-
-    slope = (MIN_EPSILON - EPSILON) / EPSILON_DECAY_STEPS
-    decayed_epsilon = epsilon
-    epsilon = jnp.maximum(epsilon, decayed_epsilon)
-
-    return epsilon
+# TODO: Make simple linear epsilon scheduler. 
 
 # Make networks 
 
 def make_networks(
     num_actions: int, 
-    policy_layer_sizes: list = [64],):
+    policy_layer_sizes: list = [64, 64],):
 
     @hk.without_apply_rng
     @hk.transform
@@ -158,15 +152,13 @@ def choose_action(
     ):
     
     actors_key, sample_key = jax.random.split(actors_key)
-    # sample_randomly = jax.random.uniform(sample_key, (1,))[0] < epsilon
     sample_randomly = jax.random.uniform(sample_key) < epsilon
 
     actors_key, action_key = jax.random.split(actors_key)
 
     action = jax.lax.cond(
         sample_randomly, 
-        # TODO: Add num actions here 
-        lambda: select_random_action(action_key, 2), 
+        lambda: select_random_action(action_key, num_actions), 
         lambda: greedy_action(q_values), 
     ) 
 
@@ -184,30 +176,30 @@ def dqn_loss(
     target_policy_params, ):
 
     q_values = jax.vmap(policy_network.apply, in_axes=(None, 0))(policy_params, states)
-    # TODO: infer num classes from q_values
-    # selected_q_values = jnp.sum(
-    #     jax.nn.one_hot(actions, num_classes = num_actions) * q_values, 
-    #     axis=-1, 
-    #     keepdims=True)
-    
-    # selected_q_values = jnp.squeeze(selected_q_values)
-
     target_q_values = jax.vmap(policy_network.apply, in_axes=(None, 0))(target_policy_params, next_states)
-    # selected_target_q_values = jnp.max(target_q_values, axis=-1)
-
-    # bellman_target = rewards + DISCOUNT_GAMMA * (1 - dones) * selected_target_q_values
     
-    # bellman_target = jax.lax.stop_gradient(bellman_target)
+    # TODO: infer num classes from q_values
+    selected_q_values = jnp.sum(
+        jax.nn.one_hot(actions, num_classes = num_actions) * q_values, 
+        axis=-1, 
+        keepdims=True)
+    selected_q_values = jnp.squeeze(selected_q_values)
 
-    # td_error = (bellman_target - selected_q_values) ** 2 
+    
+    selected_target_q_values = jnp.max(target_q_values, axis=-1)
+    bellman_target = rewards + DISCOUNT_GAMMA * (1 - dones) * selected_target_q_values
+    bellman_target = jax.lax.stop_gradient(bellman_target)
+    td_error = (bellman_target - selected_q_values) 
 
-    td_error = jax.vmap(rlax.q_learning)(
-        q_tm1=q_values, 
-        a_tm1=actions, 
-        r_t=rewards, 
-        discount_t=(1 - dones) * DISCOUNT_GAMMA,
-        q_t=target_q_values
-    )
+    # Can also just use rlax here. 
+
+    # td_error = jax.vmap(rlax.q_learning)(
+    #     q_tm1=q_values, 
+    #     a_tm1=actions, 
+    #     r_t=rewards, 
+    #     discount_t=(1 - dones) * DISCOUNT_GAMMA,
+    #     q_t=target_q_values
+    # )
 
     loss = jnp.mean(rlax.l2_loss(td_error))
     
@@ -227,6 +219,7 @@ def update_policy(system_state: DQNSystemState, sampled_batch: DQNBufferData, gl
     policy_params = system_state.network_params.policy_params
     target_policy_params = system_state.network_params.target_policy_params
 
+    # NB here. TARGET_UPDATE_PERIOD must be divisble by TRAIN_EVERY. 
     target_policy_params = optax.periodic_update(
             policy_params, target_policy_params, global_step, TARGET_UPDATE_PERIOD
         )
@@ -290,7 +283,6 @@ while global_step < 50_000:
 
         episode_return += reward
         
-        # TODO: set TRAIN_EVERY
         if can_sample(system_state.buffer) and (global_step % TRAIN_EVERY == 0): 
             
             buffer_state = system_state.buffer
