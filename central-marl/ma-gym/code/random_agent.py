@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import jax 
 import gym 
 
-ENV_NAME = "ma_gym:Switch2-v0"
+ENV_NAME = "ma_gym:Checkers-v0"
 MASTER_PRNGKEY = jax.random.PRNGKey(2022)
 MASTER_PRNGKEY, actors_key = jax.random.split(MASTER_PRNGKEY)
 

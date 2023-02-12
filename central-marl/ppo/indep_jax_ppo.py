@@ -243,8 +243,10 @@ while global_step < 50_000:
     episode_return = 0
     while not team_done: 
         
+        # For stepping the environment
         step_joint_action = jnp.empty(num_agents, dtype=jnp.int32)
 
+        # Data to append to buffer
         act_joint_action = jnp.empty((num_agents,1), dtype=jnp.int32)
         act_values = jnp.empty((num_agents), dtype=jnp.float32)
         act_log_probs = jnp.empty((num_agents), dtype=jnp.float32)
