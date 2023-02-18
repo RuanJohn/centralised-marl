@@ -1,7 +1,7 @@
 import chex 
 import jax.numpy as jnp
 
-from typing import Tuple
+from typing import Tuple, Any, Optional
 
 # TODO merge all states into 1. 
 # PPO states 
@@ -17,6 +17,8 @@ class BufferState:
     entropy: jnp.ndarray
     counter: jnp.int32 
     key: chex.PRNGKey
+    policy_hidden_states: jnp.ndarray = None 
+    critic_hidden_states: jnp.ndarray = None
 
 @chex.dataclass
 class BufferData: 
@@ -27,12 +29,18 @@ class BufferData:
     log_prob: jnp.ndarray
     value: jnp.ndarray
     entropy: jnp.ndarray
+    policy_hidden_state: jnp.ndarray = None 
+    critic_hidden_state: jnp.ndarray = None
 
 @chex.dataclass
 class NetworkParams: 
     policy_params: dict
     target_policy_params : dict = None
     critic_params: dict = None
+    policy_hidden_state: Optional[Any] = None 
+    critic_hidden_state: Optional[Any] = None 
+    policy_init_state: Optional[Any] = None 
+    critic_init_state: Optional[Any] = None
 
 @chex.dataclass
 class OptimiserStates: 
@@ -49,6 +57,7 @@ class PPOSystemState:
     networks_key: chex.PRNGKey
     network_params: NetworkParams
     optimiser_states: OptimiserStates
+    train_buffer: BufferState = None
 
 # DQN states
 
