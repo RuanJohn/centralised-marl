@@ -4,10 +4,8 @@ import jax.numpy as jnp
 import jax 
 import haiku as hk
 import optax
-import distrax
 import rlax
 import chex
-import copy
 
 from utils.types import (
     DQNBufferData, 
