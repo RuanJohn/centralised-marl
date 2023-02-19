@@ -4,10 +4,21 @@ ma-gym environment."""
 import jax.numpy as jnp 
 import jax 
 import gym 
+from utils.loggers import WandbLogger
 
-ENV_NAME = "ma_gym:Checkers-v0"
+ENV_NAME = "ma_gym:Lumberjacks-v0"
 MASTER_PRNGKEY = jax.random.PRNGKey(2022)
 MASTER_PRNGKEY, actors_key = jax.random.split(MASTER_PRNGKEY)
+
+LOG = False
+
+if LOG: 
+    logger = WandbLogger(
+        exp_config={
+        "agent_type": "random",
+        "env_name": ENV_NAME}, 
+        run_name="test_logger2", 
+    )
 
 env = gym.make(ENV_NAME)
 
@@ -31,13 +42,14 @@ def choose_action(actors_key):
 
 global_step = 0
 episode = 0 
-while global_step < 50_000: 
+while global_step < 50_00: 
 
     team_done = False 
     obs = env.reset()
     episode_return = 0
     while not team_done: 
         
+        log_details = {}
         step_joint_action = jnp.empty(num_agents, dtype=jnp.int32)
 
         for agent in range(num_agents):
@@ -55,6 +67,14 @@ while global_step < 50_000:
         obs = obs_ 
         episode_return += jnp.sum(jnp.array(reward, dtype=jnp.float32))
 
+    log_details = {}
+    log_details["global_step"] = global_step
+    log_details["episode_return"] = episode_return
+    log_details["episode"] = episode
+    logger.write(logging_details=log_details, step=global_step)
+
     episode += 1
     if episode % 10 == 0: 
-        print(f"EPISODE: {episode}, GLOBAL_STEP: {global_step}, EPISODE_RETURN: {episode_return}")   
+        print(f"EPISODE: {episode}, GLOBAL_STEP: {global_step}, EPISODE_RETURN: {episode_return}") 
+
+logger.close()  

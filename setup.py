@@ -11,6 +11,10 @@ cleanrl_requirements = [
     # "gym==0.21.0",
 ]
 
+logging_requirements = [
+    "wandb",
+]
+
 setup(
     name="centralised-marl",
     version="0.0.0",
@@ -31,6 +35,7 @@ setup(
     ],
     extras_require={
         "cleanrl": cleanrl_requirements,
+        "logging": logging_requirements, 
     },
     classifiers=[
         "Development Status :: 0",
