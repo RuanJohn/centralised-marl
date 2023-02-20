@@ -85,8 +85,7 @@ class CentralChunkedControllerWrapper(gym.Env):
         
         # The joint action here is an array where each index corresponds to each agents 
         # action. 
-        joint_action = joint_action
-        obs_n, reward_n, done_n, info = self.env.step(joint_action.to_list())
+        obs_n, reward_n, done_n, info = self.env.step(joint_action)
         
         joint_obs = self.create_joint_obs(obs_n)
         team_reward = np.sum(np.array(reward_n))

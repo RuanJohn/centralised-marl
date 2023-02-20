@@ -3,6 +3,7 @@
 """
 
 import jax.numpy as jnp 
+import numpy as np 
 import jax 
 import haiku as hk
 import optax
@@ -18,7 +19,7 @@ from utils.types import (
     OptimiserStates, 
 )
 
-from utils.replay_buffer import (
+from utils.chunked_replay_buffer import (
     create_buffer, 
     add, 
     reset_buffer,
@@ -29,7 +30,7 @@ from utils.array_utils import (
     add_two_leading_dims,
 )
 
-from wrappers.ma_gym_wrapper import CentralControllerWrapper
+from wrappers.ma_gym_wrapper import CentralChunkedControllerWrapper
 
 import gym
 
@@ -44,18 +45,25 @@ NUM_EPOCHS = 3
 NUM_MINIBATCHES = 8 
 MAX_GLOBAL_NORM = 0.5
 ADAM_EPS = 1e-5
-# ENV_NAME = "ma_gym:PredatorPrey7x7-v0"
-ENV_NAME = "CartPole-v0"
+ENV_NAME = "ma_gym:Checkers-v0"
+# ENV_NAME = "CartPole-v0"
 MASTER_PRNGKEY = jax.random.PRNGKey(2022)
 MASTER_PRNGKEY, networks_key, actors_key, buffer_key = jax.random.split(MASTER_PRNGKEY, 4)
 
 env = gym.make(ENV_NAME)
 
 # Uncomment for centralised marl envs. 
-# env = CentralControllerWrapper(env)
+env = CentralChunkedControllerWrapper(env)
 
 observation_dim = env.observation_space.shape[0]
-num_actions = env.action_space.n
+
+# Num actions must now be the sum over all agent 
+# obs dims. 
+num_actions = np.sum(env.action_space.nvec)
+
+# This will be used to split the network output logits for 
+# action selection.
+action_chunk_dims = env.action_map
 
 # Make networks 
 
@@ -103,7 +111,6 @@ critic_optimiser = optax.chain(
     optax.adam(learning_rate = CRITIC_LR, eps = ADAM_EPS),
     )
 
-
 policy_optimiser_state = policy_optimiser.init(policy_params)
 critic_optimiser_state = critic_optimiser.init(critic_params)
 
@@ -119,6 +126,8 @@ buffer_state = create_buffer(
     buffer_size=HORIZON, 
     num_agents=1, 
     num_envs=1, 
+    # TODO: Infer this from num agents. 
+    action_dim=2, 
     observation_dim=observation_dim, 
 )
 
@@ -130,6 +139,17 @@ system_state = PPOSystemState(
     optimiser_states=optimiser_states, 
 ) 
 
+def reshape_logits(logits): 
+
+    reshaped_logits = jnp.array(
+        jnp.split(
+        logits, 
+        indices_or_sections=action_chunk_dims[1:], 
+        axis=0)
+    )
+
+    return reshaped_logits
+
 @jax.jit
 @chex.assert_max_traces(n=1)
 def choose_action(
@@ -139,8 +159,13 @@ def choose_action(
     
     actors_key, sample_key = jax.random.split(actors_key)
 
+    # Need to split the logits here. 
+    logits = reshape_logits(logits)
+
     dist = distrax.Categorical(logits=logits)
 
+    # TODO: shapes are correct here. 
+    # worth checking the distribution is correctly sampled. 
     action, logprob = dist.sample_and_log_prob(
         seed = sample_key, 
     )
@@ -156,12 +181,27 @@ def policy_loss(
     advantages, ):
 
     logits = policy_network.apply(policy_params, states)
+
+
+    # Reshape the logits. 
+    logits = jax.vmap(reshape_logits)(logits)
+
     dist = distrax.Categorical(logits=logits)
 
-    new_log_probs = dist.log_prob(value=actions)
+    new_log_probs = dist.log_prob(value=actions) 
 
     logratio = new_log_probs - old_log_probs
+
+    # Flatten the logprobs maybe?
+    # Check this is correct. 
+    # Don't ravel. Just mean along the axis. 
+    # logratio = jnp.ravel(logratio)
+    logratio = jnp.mean(logratio, axis = 1)
+
     ratio = jnp.exp(logratio)
+
+    # NOTE: One way around this is to mean the ratios? 
+    # Otherwise need to compute per agent advantages. 
 
     # Policy loss
     loss_term_1 = -advantages * ratio
