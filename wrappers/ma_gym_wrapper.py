@@ -53,8 +53,6 @@ class CentralControllerWrapper(gym.Env):
     def unwrapped_env(self):
         return self
 
-#TODO MAKE THE CHUNKED WRAPPER. 
-
 class CentralChunkedControllerWrapper(gym.Env): 
     
     def __init__(self, ma_env):
