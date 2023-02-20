@@ -62,20 +62,20 @@ class CentralChunkedControllerWrapper(gym.Env):
         self.env = ma_env 
         self.num_agents = ma_env.n_agents 
 
-        individual_action_space_dims = np.array(
-            ma_env.action_space[i].n for i in range(ma_env.n_agents)
+        agent_action_space_dims = np.array(
+            [ma_env.action_space[i].n for i in range(ma_env.n_agents)]
         )
 
-        joint_action_space_dim = np.sum(individual_action_space_dims)
-
-        self.action_space = gym.spaces.Discrete(len(joint_action_space_dim))
+        self.action_space = gym.spaces.MultiDiscrete(agent_action_space_dims)
         
         full_obs_size = sum([len(i) for i in ma_env.reset()])
         self.observation_space = gym.spaces.Box(np.zeros(full_obs_size), np.ones(full_obs_size), (full_obs_size,), np.float32)
         self.metadata = {'render.modes': ['human', 'rgb_array']}
 
-        self.action_map = np.cumsum(individual_action_space_dims)
-
+        # This will be used to shift joint actions to the full action space later on. 
+        # Need to be shift up by 1 since the first agent's actions don't have to be 
+        # shifted. 
+        self.action_map = np.concatenate(([0], np.cumsum(agent_action_space_dims[1:])))
     def reset(self, ):
         
         obs_n = self.env.reset()
@@ -85,6 +85,8 @@ class CentralChunkedControllerWrapper(gym.Env):
     
     def step(self, joint_action): 
         
+        # The joint action here is an array where each index corresponds to each agents 
+        # action. 
         joint_action = joint_action
         obs_n, reward_n, done_n, info = self.env.step(joint_action.to_list())
         
@@ -93,16 +95,6 @@ class CentralChunkedControllerWrapper(gym.Env):
         team_done = all(done_n)
         
         return joint_obs, team_reward, team_done, info
-    
-    def random_action(self,): 
-        
-        # Make this work for agents with different action spaces.
-        # TODO: won't work.  
-        action = np.random.randint(
-            low = 0, 
-            high = self.action_space, 
-            size= 1)
-        return action 
     
     def create_joint_obs(self, env_obs):
         
