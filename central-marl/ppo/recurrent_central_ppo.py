@@ -12,7 +12,6 @@ import chex
 
 from utils.types import (
     BufferData, 
-    BufferState, 
     PPOSystemState, 
     NetworkParams,
     OptimiserStates, 
@@ -22,9 +21,10 @@ from utils.recurrent_replay_buffer import (
     create_buffer, 
     add, 
     reset_buffer,
-    should_train,
     split_buffer_into_chunks,
 )
+
+jit_add = jax.jit(add)
 
 from utils.array_utils import (
     add_two_leading_dims,
@@ -46,7 +46,7 @@ NUM_EPOCHS = 1
 NUM_MINIBATCHES = 4 
 MAX_GLOBAL_NORM = 0.5
 ADAM_EPS = 1e-5
-ENV_NAME = "ma_gym:Lumberjacks-v0"
+ENV_NAME = "ma_gym:Switch2-v0"
 # ENV_NAME = "CartPole-v0"
 MASTER_PRNGKEY = jax.random.PRNGKey(2022)
 MASTER_PRNGKEY, networks_key, actors_key, buffer_key = jax.random.split(MASTER_PRNGKEY, 4)
@@ -74,14 +74,19 @@ def make_networks(
         
         # TODO: Have extra layers later on. For now just a single 
         # recurrent layer. 
+        # NOTE: Should there be activations between layers? 
 
-        return hk.DeepRNN([hk.GRU(*policy_recurrent_layer_sizes), hk.Linear(num_actions)])(x, y)
+        return hk.DeepRNN([
+            hk.GRU(*policy_recurrent_layer_sizes), 
+            hk.Linear(num_actions)])(x, y)
 
     @hk.without_apply_rng
     @hk.transform
     def critic_nerwork(x, y):
 
-        return hk.DeepRNN([hk.GRU(*critic_recurrent_layer_sizes), hk.Linear(1)])(x, y)
+        return hk.DeepRNN(
+            [hk.GRU(*critic_recurrent_layer_sizes), 
+            hk.Linear(1)])(x, y)
 
     return policy_network, critic_nerwork,  
 
@@ -371,7 +376,8 @@ while global_step < 200_000:
         system_state.network_params.critic_hidden_state = new_critic_hidden_state
 
         buffer_state = system_state.buffer 
-        buffer_state = add(buffer_state, data)
+        # buffer_state = add(buffer_state, data)
+        buffer_state = jit_add(buffer_state, data)
         system_state.buffer = buffer_state
 
         obs = obs_ 
