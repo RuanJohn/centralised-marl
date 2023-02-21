@@ -1,4 +1,4 @@
-"""Multi-agent JAX PPO with enumerated centralised controller.
+"""Multi-agent recurrent JAX PPO with enumerated centralised controller.
    Essentially centralised training with centralised execution. 
 """
 
@@ -48,17 +48,21 @@ NUM_EPOCHS = 1
 NUM_MINIBATCHES = 4 
 MAX_GLOBAL_NORM = 0.5
 ADAM_EPS = 1e-5
-POLICY_LAYER_SIZES = None
-CRITIC_LAYER_SIZES = None
+POLICY_LAYER_SIZES = [32]
+CRITIC_LAYER_SIZES = [32]
+
+# NOTE: Can only handle single recurrent layer at
+# the moment. 
 POLICY_RECURRENT_LAYER_SIZES = [32]
 CRITIC_RECURRENT_LAYER_SIZES = [32]
-ENV_NAME = "ma_gym:Switch4-v0"
+
+ENV_NAME = "ma_gym:Switch2-v0"
 # ENV_NAME = "CartPole-v0"
 MASTER_PRNGKEY = jax.random.PRNGKey(2022)
 MASTER_PRNGKEY, networks_key, actors_key, buffer_key = jax.random.split(MASTER_PRNGKEY, 4)
 
 ALGORITHM = "rec_central_ppo"
-LOG = True 
+LOG = False
 
 if LOG: 
     logger = WandbLogger(
@@ -107,7 +111,8 @@ def make_networks(
         # recurrent layer. 
         # NOTE: Should there be activations between layers? 
 
-        return hk.DeepRNN([
+        return hk.DeepRNN(
+            [hk.nets.MLP(policy_layer_sizes, activate_final=True), 
             hk.GRU(*policy_recurrent_layer_sizes), 
             hk.Linear(num_actions)])(x, y)
 
@@ -116,7 +121,8 @@ def make_networks(
     def critic_nerwork(x, y):
 
         return hk.DeepRNN(
-            [hk.GRU(*critic_recurrent_layer_sizes), 
+            [hk.nets.MLP(critic_layer_sizes, activate_final=True), 
+            hk.GRU(*critic_recurrent_layer_sizes), 
             hk.Linear(1)])(x, y)
 
     return policy_network, critic_nerwork,  
@@ -134,7 +140,7 @@ def make_init_state_fns():
             lambda: 1,
         )
 
-        return hk.GRU(32).initial_state(init_state_size)
+        return hk.GRU(*POLICY_RECURRENT_LAYER_SIZES).initial_state(init_state_size)
     
     @hk.without_apply_rng
     @hk.transform
@@ -146,7 +152,7 @@ def make_init_state_fns():
             lambda: 1,
         )
 
-        return hk.GRU(32).initial_state(init_state_size)
+        return hk.GRU(*CRITIC_RECURRENT_LAYER_SIZES).initial_state(init_state_size)
 
     return policy_init_state, critic_init_state, 
 
@@ -482,3 +488,5 @@ while global_step < 100_000:
     episode += 1
     if episode % 10 == 0: 
         print(f"EPISODE: {episode}, GLOBAL_STEP: {global_step}, EPISODE_RETURN: {episode_return}")   
+
+logger.close()  

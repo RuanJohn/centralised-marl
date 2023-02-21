@@ -49,7 +49,7 @@ MAX_GLOBAL_NORM = 0.5
 ADAM_EPS = 1e-5
 POLICY_LAYER_SIZES = [64, 64]
 CRITIC_LAYER_SIZES = [64, 64]
-ENV_NAME = "ma_gym:Switch4-v0"
+ENV_NAME = "ma_gym:Lumberjacks-v0"
 # ENV_NAME = "CartPole-v0"
 MASTER_PRNGKEY = jax.random.PRNGKey(2022)
 MASTER_PRNGKEY, networks_key, actors_key, buffer_key = jax.random.split(MASTER_PRNGKEY, 4)
@@ -394,3 +394,5 @@ while global_step < 100_000:
     episode += 1
     if episode % 10 == 0: 
         print(f"EPISODE: {episode}, GLOBAL_STEP: {global_step}, EPISODE_RETURN: {episode_return}")   
+
+logger.close()  

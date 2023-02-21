@@ -1,4 +1,5 @@
-"""Independent multi-agent JAX PPO."""
+"""Independent multi-agent JAX PPO. NOte that this implementation 
+uses shared network weights between all agetns."""
 
 import jax.numpy as jnp 
 import jax 
@@ -262,7 +263,7 @@ def update_critic(
 global_step = 0
 episode = 0 
 log_data = {}
-while global_step < 50_000: 
+while global_step < 100_000: 
 
     team_done = False 
     obs = env.reset()
@@ -363,3 +364,5 @@ while global_step < 50_000:
     episode += 1
     if episode % 10 == 0: 
         print(f"EPISODE: {episode}, GLOBAL_STEP: {global_step}, EPISODE_RETURN: {episode_return}")   
+
+logger.close()  
