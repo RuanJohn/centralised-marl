@@ -6,14 +6,11 @@ import jax.numpy as jnp
 import jax 
 import haiku as hk
 import optax
-import distrax
 import rlax
 import chex
-import copy
 
 from utils.types import (
-    DQNBufferData, 
-    DQNBufferState, 
+    DQNBufferData,
     DQNSystemState, 
     NetworkParams,
     OptimiserStates, 
@@ -46,7 +43,7 @@ MAX_GLOBAL_NORM = 0.5
 EPSILON = 1.0 
 MIN_EPSILON = 0.05 
 EPSILON_DECAY_STEPS = 10_000
-EPSILON_DECAY_RATE = 0.9999
+EPSILON_DECAY_RATE = 0.9995
 # ENV_NAME = "ma_gym:Switch2-v0"
 ENV_NAME = "CartPole-v0"
 
@@ -117,13 +114,6 @@ system_state = DQNSystemState(
     network_params=network_params, 
     optimiser_states=optimiser_states, 
 ) 
-
-# TODO: Cannot select like this when jitting. 
-def random_action(): 
-
-    action = env.action_space.sample()
-
-    return action
 
 # NB must sample randomly like this. 
 def select_random_action(key, num_actions): 
