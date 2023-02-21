@@ -6,7 +6,7 @@ import jax
 import gym 
 from utils.loggers import WandbLogger
 
-ENV_NAME = "ma_gym:Lumberjacks-v0"
+ENV_NAME = "ma_gym:Switch4-v0"
 MASTER_PRNGKEY = jax.random.PRNGKey(2022)
 MASTER_PRNGKEY, actors_key = jax.random.split(MASTER_PRNGKEY)
 
@@ -67,11 +67,12 @@ while global_step < 50_00:
         obs = obs_ 
         episode_return += jnp.sum(jnp.array(reward, dtype=jnp.float32))
 
-    log_details = {}
-    log_details["global_step"] = global_step
-    log_details["episode_return"] = episode_return
-    log_details["episode"] = episode
-    logger.write(logging_details=log_details, step=global_step)
+    if LOG: 
+        log_details = {}
+        log_details["global_step"] = global_step
+        log_details["episode_return"] = episode_return
+        log_details["episode"] = episode
+        logger.write(logging_details=log_details, step=global_step)
 
     episode += 1
     if episode % 10 == 0: 

@@ -1,5 +1,5 @@
-"""Multi-agent JAX PPO with enumerated centralised controller.
-   Essentially centralised training with centralised execution. 
+"""Multi-agent 'chunked' JAX PPO. This is somewhere between 
+    value decomposition and fully centralised MARL. 
 """
 
 import jax.numpy as jnp 
@@ -30,6 +30,8 @@ from utils.array_utils import (
     add_two_leading_dims,
 )
 
+from utils.loggers import WandbLogger
+
 from wrappers.ma_gym_wrapper import CentralChunkedControllerWrapper
 
 import gym
@@ -45,18 +47,43 @@ NUM_EPOCHS = 3
 NUM_MINIBATCHES = 8 
 MAX_GLOBAL_NORM = 0.5
 ADAM_EPS = 1e-5
-ENV_NAME = "ma_gym:Checkers-v0"
+POLICY_LAYER_SIZES = [64, 64]
+CRITIC_LAYER_SIZES = [64, 64]
+ENV_NAME = "ma_gym:Switch4-v0"
 # ENV_NAME = "CartPole-v0"
 MASTER_PRNGKEY = jax.random.PRNGKey(2022)
 MASTER_PRNGKEY, networks_key, actors_key, buffer_key = jax.random.split(MASTER_PRNGKEY, 4)
+
+ALGORITHM = "ff_chunked_ppo"
+LOG = True 
+
+if LOG: 
+    logger = WandbLogger(
+        exp_config={
+        "algorithm": ALGORITHM,
+        "env_name": ENV_NAME,
+        "horizon": HORIZON, 
+        "clip_epsilon": CLIP_EPSILON, 
+        "policy_lr": POLICY_LR, 
+        "critic_lr": CRITIC_LR, 
+        "gamma": DISCOUNT_GAMMA, 
+        "gae_lambda": GAE_LAMBDA, 
+        "num_epochs": NUM_EPOCHS, 
+        "num_minibatches": NUM_MINIBATCHES,
+        "max_global_norm": MAX_GLOBAL_NORM,
+        "adam_epsilon": ADAM_EPS, 
+        "policy_layer_sizes": POLICY_LAYER_SIZES, 
+        "critic_layer_sizes": CRITIC_LAYER_SIZES, 
+        },  
+    )
 
 env = gym.make(ENV_NAME)
 
 # Uncomment for centralised marl envs. 
 env = CentralChunkedControllerWrapper(env)
 
+num_agents = env.num_agents
 observation_dim = env.observation_space.shape[0]
-
 # Num actions must now be the sum over all agent 
 # obs dims. 
 num_actions = np.sum(env.action_space.nvec)
@@ -69,8 +96,8 @@ action_chunk_dims = env.action_map
 
 def make_networks(
     num_actions: int, 
-    policy_layer_sizes: list = [64, 64], 
-    critic_layer_sizes: list = [64, 64], ):
+    policy_layer_sizes: list = POLICY_LAYER_SIZES, 
+    critic_layer_sizes: list = CRITIC_LAYER_SIZES, ):
 
     @hk.without_apply_rng
     @hk.transform
@@ -126,8 +153,7 @@ buffer_state = create_buffer(
     buffer_size=HORIZON, 
     num_agents=1, 
     num_envs=1, 
-    # TODO: Infer this from num agents. 
-    action_dim=2, 
+    action_dim=num_agents, 
     observation_dim=observation_dim, 
 )
 
@@ -182,7 +208,6 @@ def policy_loss(
 
     logits = policy_network.apply(policy_params, states)
 
-
     # Reshape the logits. 
     logits = jax.vmap(reshape_logits)(logits)
 
@@ -192,16 +217,24 @@ def policy_loss(
 
     logratio = new_log_probs - old_log_probs
 
-    # Flatten the logprobs maybe?
-    # Check this is correct. 
-    # Don't ravel. Just mean along the axis. 
-    # logratio = jnp.ravel(logratio)
-    logratio = jnp.mean(logratio, axis = 1)
+    # There is a problem that the logits and actions are 
+    # now computed per agent while the value, reward and advantage are 
+    # computed for the team. There are 3 ways around this. 
+    # 1. Mean the log ratios over the agents to make it 
+    #   the same dim as the advantages.  
+    # 2. Keep the global advantages but give each agent the same 
+    #   advantage. 
+    # 3. Store per agent values and rewards and then compute 
+    #   per agent advantages.
+
+    # Option 1. 
+    # logratio = jnp.mean(logratio, axis = 1)
 
     ratio = jnp.exp(logratio)
 
-    # NOTE: One way around this is to mean the ratios? 
-    # Otherwise need to compute per agent advantages. 
+    # Option 2.
+    # TODO: Make this better.  
+    advantages = jnp.stack([advantages] * num_agents).T
 
     # Policy loss
     loss_term_1 = -advantages * ratio
@@ -280,7 +313,8 @@ def update_critic(
 
 global_step = 0
 episode = 0 
-while global_step < 50_000: 
+log_data = {}
+while global_step < 100_000: 
 
     done = False 
     obs = env.reset()
@@ -350,6 +384,12 @@ while global_step < 50_000:
             
             buffer_state = reset_buffer(buffer_state) 
             system_state.buffer = buffer_state
+    
+    if LOG: 
+        log_data["episode"] = episode
+        log_data["episode_return"] = episode_return
+        log_data["global_step"] = global_step
+        logger.write(logging_details=log_data)
     
     episode += 1
     if episode % 10 == 0: 

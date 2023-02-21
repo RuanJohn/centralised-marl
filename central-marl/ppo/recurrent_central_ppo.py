@@ -30,6 +30,8 @@ from utils.array_utils import (
     add_two_leading_dims,
 )
 
+from utils.loggers import WandbLogger
+
 from wrappers.ma_gym_wrapper import CentralControllerWrapper
 
 import gym
@@ -46,10 +48,39 @@ NUM_EPOCHS = 1
 NUM_MINIBATCHES = 4 
 MAX_GLOBAL_NORM = 0.5
 ADAM_EPS = 1e-5
-ENV_NAME = "ma_gym:Switch2-v0"
+POLICY_LAYER_SIZES = None
+CRITIC_LAYER_SIZES = None
+POLICY_RECURRENT_LAYER_SIZES = [32]
+CRITIC_RECURRENT_LAYER_SIZES = [32]
+ENV_NAME = "ma_gym:Switch4-v0"
 # ENV_NAME = "CartPole-v0"
 MASTER_PRNGKEY = jax.random.PRNGKey(2022)
 MASTER_PRNGKEY, networks_key, actors_key, buffer_key = jax.random.split(MASTER_PRNGKEY, 4)
+
+ALGORITHM = "rec_central_ppo"
+LOG = True 
+
+if LOG: 
+    logger = WandbLogger(
+        exp_config={
+        "algorithm": ALGORITHM,
+        "env_name": ENV_NAME,
+        "horizon": HORIZON, 
+        "clip_epsilon": CLIP_EPSILON, 
+        "policy_lr": POLICY_LR, 
+        "critic_lr": CRITIC_LR, 
+        "gamma": DISCOUNT_GAMMA, 
+        "gae_lambda": GAE_LAMBDA, 
+        "num_epochs": NUM_EPOCHS, 
+        "num_minibatches": NUM_MINIBATCHES,
+        "max_global_norm": MAX_GLOBAL_NORM,
+        "adam_epsilon": ADAM_EPS, 
+        "policy_layer_sizes": POLICY_LAYER_SIZES, 
+        "critic_layer_sizes": CRITIC_LAYER_SIZES, 
+        "policy_recurrent_layer_sizes": POLICY_RECURRENT_LAYER_SIZES, 
+        "critic_recurrent_layer_sizes": CRITIC_RECURRENT_LAYER_SIZES, 
+        },  
+    )
 
 env = gym.make(ENV_NAME)
 
@@ -63,10 +94,10 @@ num_actions = env.action_space.n
 
 def make_networks(
     num_actions: int, 
-    policy_layer_sizes: list = [32],
-    policy_recurrent_layer_sizes: list = [32],
-    critic_layer_sizes: list = [32], 
-    critic_recurrent_layer_sizes: list = [32], ):
+    policy_layer_sizes: list = POLICY_LAYER_SIZES,
+    policy_recurrent_layer_sizes: list = POLICY_RECURRENT_LAYER_SIZES,
+    critic_layer_sizes: list = CRITIC_LAYER_SIZES, 
+    critic_recurrent_layer_sizes: list = CRITIC_RECURRENT_LAYER_SIZES, ):
 
     @hk.without_apply_rng
     @hk.transform
@@ -324,7 +355,8 @@ def update_critic(
 
 global_step = 0
 episode = 0 
-while global_step < 200_000: 
+log_data = {}
+while global_step < 100_000: 
 
     done = False 
     obs = env.reset()
@@ -441,6 +473,12 @@ while global_step < 200_000:
             buffer_state = reset_buffer(buffer_state) 
             system_state.buffer = buffer_state
     
+    if LOG: 
+        log_data["episode"] = episode
+        log_data["episode_return"] = episode_return
+        log_data["global_step"] = global_step
+        logger.write(logging_details=log_data)
+
     episode += 1
     if episode % 10 == 0: 
         print(f"EPISODE: {episode}, GLOBAL_STEP: {global_step}, EPISODE_RETURN: {episode_return}")   

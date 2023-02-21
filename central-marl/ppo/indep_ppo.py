@@ -10,7 +10,6 @@ import chex
 
 from utils.types import (
     BufferData, 
-    BufferState, 
     PPOSystemState, 
     NetworkParams,
     OptimiserStates, 
@@ -20,8 +19,9 @@ from utils.replay_buffer import (
     create_buffer, 
     add, 
     reset_buffer,
-    should_train,
 )
+
+from utils.loggers import WandbLogger
 
 import gym
 
@@ -34,13 +34,38 @@ POLICY_LR = 0.005
 CRITIC_LR = 0.005
 DISCOUNT_GAMMA = 0.99 
 GAE_LAMBDA = 0.95
-NUM_EPOCHS = 2
-NUM_MINIBATCHES = 2 
+NUM_EPOCHS = 3
+NUM_MINIBATCHES = 8 
 MAX_GLOBAL_NORM = 0.5
 ADAM_EPS = 1e-5
-ENV_NAME = "ma_gym:Checkers-v0"
+POLICY_LAYER_SIZES = [64, 64]
+CRITIC_LAYER_SIZES = [64, 64]
+ENV_NAME = "ma_gym:Switch4-v0"
 MASTER_PRNGKEY = jax.random.PRNGKey(2022)
 MASTER_PRNGKEY, networks_key, actors_key, buffer_key = jax.random.split(MASTER_PRNGKEY, 4)
+
+ALGORITHM = "ff_indep_ppo"
+LOG = True 
+
+if LOG: 
+    logger = WandbLogger(
+        exp_config={
+        "algorithm": ALGORITHM,
+        "env_name": ENV_NAME,
+        "horizon": HORIZON, 
+        "clip_epsilon": CLIP_EPSILON, 
+        "policy_lr": POLICY_LR, 
+        "critic_lr": CRITIC_LR, 
+        "gamma": DISCOUNT_GAMMA, 
+        "gae_lambda": GAE_LAMBDA, 
+        "num_epochs": NUM_EPOCHS, 
+        "num_minibatches": NUM_MINIBATCHES,
+        "max_global_norm": MAX_GLOBAL_NORM,
+        "adam_epsilon": ADAM_EPS, 
+        "policy_layer_sizes": POLICY_LAYER_SIZES, 
+        "critic_layer_sizes": CRITIC_LAYER_SIZES, 
+        },  
+    )
 
 env = gym.make(ENV_NAME)
 
@@ -54,8 +79,8 @@ num_agents = env.n_agents
 
 def make_networks(
     num_actions: int, 
-    policy_layer_sizes: list = [64, 64], 
-    critic_layer_sizes: list = [64, 64], ):
+    policy_layer_sizes: list = POLICY_LAYER_SIZES, 
+    critic_layer_sizes: list = CRITIC_LAYER_SIZES, ):
 
     @hk.without_apply_rng
     @hk.transform
@@ -236,6 +261,7 @@ def update_critic(
 
 global_step = 0
 episode = 0 
+log_data = {}
 while global_step < 50_000: 
 
     team_done = False 
@@ -327,6 +353,12 @@ while global_step < 50_000:
                 
             buffer_state = reset_buffer(buffer_state) 
             system_state.buffer = buffer_state
+
+    if LOG: 
+        log_data["episode"] = episode
+        log_data["episode_return"] = episode_return
+        log_data["global_step"] = global_step
+        logger.write(logging_details=log_data)
 
     episode += 1
     if episode % 10 == 0: 
