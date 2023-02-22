@@ -1,5 +1,5 @@
-"""Multi-agent JAX DQN with enumerated centralised controller.
-   Essentially centralised training with centralised execution. 
+"""Multi-agent 'chunked' JAX DQN. This is somewhere between 
+    value decomposition and fully centralised MARL. 
 """
 
 import jax.numpy as jnp 
