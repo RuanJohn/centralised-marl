@@ -37,6 +37,7 @@ class NetworkParams:
     policy_params: dict
     target_policy_params : dict = None
     critic_params: dict = None
+    target_critic_params: dict = None
     policy_hidden_state: Optional[Any] = None 
     critic_hidden_state: Optional[Any] = None 
     policy_init_state: Optional[Any] = None 
