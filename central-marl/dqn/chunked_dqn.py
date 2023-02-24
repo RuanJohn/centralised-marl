@@ -45,7 +45,7 @@ EPSILON = 1.0
 MIN_EPSILON = 0.05 
 EPSILON_DECAY_STEPS = 10_000
 EPSILON_DECAY_RATE = 0.9999
-ENV_NAME = "ma_gym:Switch2-v0"
+ENV_NAME = "ma_gym:Switch4-v0"
 
 MASTER_PRNGKEY = jax.random.PRNGKey(2022)
 MASTER_PRNGKEY, networks_key, actors_key, buffer_key = jax.random.split(MASTER_PRNGKEY, 4)
@@ -269,7 +269,7 @@ def update_policy(system_state: DQNSystemState, sampled_batch: DQNBufferData, gl
 
 global_step = 0
 episode = 0 
-while global_step < 50_000: 
+while global_step < 100_000: 
 
     done = False 
     obs = env.reset()
