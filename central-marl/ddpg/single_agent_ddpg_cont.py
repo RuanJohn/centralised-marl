@@ -275,7 +275,7 @@ def update_policy(system_state: DQNSystemState, sampled_batch: DQNBufferData):
 
 global_step = 0
 episode = 0 
-while global_step < 50_000: 
+while global_step < 200_000: 
 
     done = False 
     obs = env.reset()
@@ -287,11 +287,6 @@ while global_step < 50_000:
         actors_key = system_state.actors_key
         actors_key, action = add_action_noise(action, actors_key)
         system_state.actors_key = actors_key
-
-        action_value = critic_network.apply(
-            system_state.network_params.critic_params, 
-            jnp.concatenate((obs, action))
-        )
 
         # Covert action to int in order to step the env. 
         # Can also handle in the wrapper
