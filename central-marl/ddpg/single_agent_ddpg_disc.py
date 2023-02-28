@@ -32,10 +32,10 @@ import gym
 
 # Constants: 
 MAX_REPLAY_SIZE = 200_000
-MIN_REPLAY_SIZE = 1_0
-BATCH_SIZE = 8
+MIN_REPLAY_SIZE = 1_000
+BATCH_SIZE = 100
 TRAIN_EVERY = 50
-POLYAK_UPDATE_VALUE = 0.995
+POLYAK_UPDATE_VALUE = 0.005
 POLICY_LR = 0.001
 CRITIC_LR = 0.001
 DISCOUNT_GAMMA = 0.99 
@@ -194,7 +194,7 @@ def critic_loss(
     networks_key = train_keys[0]
     train_keys = train_keys[1:]
 
-    target_actions, _ = jax.vmap(select_action_train, in_axes=(0))(logits)
+    _, target_actions, _ = jax.vmap(select_action, in_axes=(0, 0))(logits, train_keys)
     target_state_actions = jnp.concatenate((next_states, target_actions), axis=1)
     target_action_values = jax.vmap(critic_network.apply, in_axes=(None, 0))(target_critic_params, target_state_actions)
     target_action_values = jnp.squeeze(target_action_values)
@@ -228,7 +228,7 @@ def policy_loss(
     train_keys = train_keys[1:]
 
     # Should there be gumbel noise here? 
-    online_hard_actions, online_soft_actions = jax.vmap(select_action_train, in_axes=(0))(logits)
+    _, online_hard_actions, online_soft_actions = jax.vmap(select_action, in_axes=(0, 0))(logits, train_keys)
     
     train_actions = online_hard_actions -jax.lax.stop_gradient(online_soft_actions) + online_soft_actions
     online_state_actions = jnp.concatenate((states, train_actions), axis=1) 
@@ -271,7 +271,7 @@ def update_critic(system_state: DQNSystemState, sampled_batch: DQNBufferData):
     )
  
     target_critic_params = optax.incremental_update(
-            target_critic_params, critic_params, POLYAK_UPDATE_VALUE, 
+            critic_params, target_critic_params, POLYAK_UPDATE_VALUE, 
         )
 
     updates, new_critic_optimiser_state = critic_optimiser.update(grads, critic_optimiser_state)
@@ -304,7 +304,7 @@ def update_policy(system_state: DQNSystemState, sampled_batch: DQNBufferData):
     )
 
     target_policy_params = optax.incremental_update(
-            target_policy_params, policy_params, POLYAK_UPDATE_VALUE, 
+            policy_params, target_policy_params, POLYAK_UPDATE_VALUE, 
         )
 
     updates, new_policy_optimiser_state = policy_optimiser.update(grads, policy_optimiser_state)
