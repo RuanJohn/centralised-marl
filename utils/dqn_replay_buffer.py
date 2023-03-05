@@ -14,6 +14,7 @@ def create_buffer(
     num_envs: int = 1,  
     action_dim: int = 1, 
     buffer_key: chex.PRNGKey = random.PRNGKey(0),
+    action_dtype = jnp.int32
 ) -> DQNBufferState: 
 
     """A simple trajectory buffer. 
@@ -33,7 +34,7 @@ def create_buffer(
 
     buffer_state = DQNBufferState(
         states = jnp.empty((buffer_size, num_envs, num_agents, observation_dim), dtype=jnp.float32), 
-        actions = jnp.empty((buffer_size, num_envs, num_agents, action_dim), dtype=jnp.int32),
+        actions = jnp.empty((buffer_size, num_envs, num_agents, action_dim), dtype=action_dtype),
         rewards = jnp.empty((buffer_size, num_envs, num_agents), dtype=jnp.float32),  
         dones = jnp.empty((buffer_size, num_envs, num_agents), dtype=bool), 
         next_states = jnp.empty((buffer_size, num_envs, num_agents, observation_dim), dtype=jnp.float32),
