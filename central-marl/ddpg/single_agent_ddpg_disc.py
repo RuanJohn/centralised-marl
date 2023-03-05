@@ -35,7 +35,7 @@ MAX_REPLAY_SIZE = 200_000
 MIN_REPLAY_SIZE = 1_000
 BATCH_SIZE = 100
 TRAIN_EVERY = 50
-POLYAK_UPDATE_VALUE = 0.005
+POLYAK_UPDATE_VALUE = 0.01
 POLICY_LR = 0.001
 CRITIC_LR = 0.001
 DISCOUNT_GAMMA = 0.99 
@@ -87,7 +87,7 @@ policy_network, critic_network = make_networks(num_actions=num_actions)
 dummy_obs_data = jnp.zeros(observation_dim, dtype=jnp.float32)
 
 # TODO: Double check datatype here. 
-dummy_action_data = jnp.ones(num_actions, dtype=jnp.int32)
+dummy_action_data = jnp.ones(num_actions, dtype=jnp.float32)
 
 networks_key, policy_init_key, critic_init_key = jax.random.split(networks_key, 3)
 
@@ -125,6 +125,7 @@ buffer_state = create_buffer(
     num_envs=1, 
     observation_dim=observation_dim, 
     action_dim=num_actions, 
+    action_dtype=jnp.float32,
 )
 
 system_state = DQNSystemState(
@@ -147,12 +148,12 @@ def select_action(
 
     shifted_logits = logits + gumbel_noise
 
+    soft_action = jax.nn.softmax(shifted_logits / SOFTMAX_TEMP)
+
     hard_action = jax.nn.one_hot(
-        jnp.argmax(shifted_logits), 
+        jnp.argmax(soft_action), 
         num_classes=num_actions, 
     )
-
-    soft_action = jax.nn.softmax(shifted_logits / SOFTMAX_TEMP)
 
     return actors_key, hard_action, soft_action
 
@@ -162,12 +163,12 @@ def select_action_train(
 
     shifted_logits = logits 
 
+    soft_action = jax.nn.softmax(shifted_logits / SOFTMAX_TEMP)
+
     hard_action = jax.nn.one_hot(
-        jnp.argmax(shifted_logits), 
+        jnp.argmax(soft_action), 
         num_classes=num_actions, 
     )
-
-    soft_action = jax.nn.softmax(shifted_logits / SOFTMAX_TEMP)
 
     return hard_action, soft_action
 
@@ -269,13 +270,13 @@ def update_critic(system_state: DQNSystemState, sampled_batch: DQNBufferData):
         target_policy_params, 
         networks_key,  
     )
- 
-    target_critic_params = optax.incremental_update(
-            critic_params, target_critic_params, POLYAK_UPDATE_VALUE, 
-        )
 
     updates, new_critic_optimiser_state = critic_optimiser.update(grads, critic_optimiser_state)
     new_critic_params = optax.apply_updates(critic_params, updates)
+
+    target_critic_params = optax.incremental_update(
+            new_critic_params, target_critic_params, POLYAK_UPDATE_VALUE, 
+        )
 
     system_state.optimiser_states.critic_state = new_critic_optimiser_state
     system_state.network_params.critic_params = new_critic_params
@@ -303,12 +304,12 @@ def update_policy(system_state: DQNSystemState, sampled_batch: DQNBufferData):
         networks_key, 
     )
 
-    target_policy_params = optax.incremental_update(
-            policy_params, target_policy_params, POLYAK_UPDATE_VALUE, 
-        )
-
     updates, new_policy_optimiser_state = policy_optimiser.update(grads, policy_optimiser_state)
     new_policy_params = optax.apply_updates(policy_params, updates)
+
+    target_policy_params = optax.incremental_update(
+            new_policy_params, target_policy_params, POLYAK_UPDATE_VALUE, 
+        )
 
     system_state.optimiser_states.policy_state = new_policy_optimiser_state
     system_state.network_params.policy_params = new_policy_params
