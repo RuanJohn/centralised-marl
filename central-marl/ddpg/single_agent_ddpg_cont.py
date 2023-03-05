@@ -30,24 +30,48 @@ from wrappers.ma_gym_wrapper import CentralControllerWrapper
 
 import gym
 
+from utils.loggers import WandbLogger
+
 # Constants: 
-MAX_REPLAY_SIZE = 200_000
+MAX_REPLAY_SIZE = 500_000
 MIN_REPLAY_SIZE = 1_000
-BATCH_SIZE = 100
+BATCH_SIZE = 64
 TRAIN_EVERY = 50
-POLYAK_UPDATE_VALUE = 0.995
+POLYAK_UPDATE_VALUE = 0.005
 POLICY_LR = 0.001
 CRITIC_LR = 0.001
+ADAM_EPS=1e-5
 DISCOUNT_GAMMA = 0.99 
 MAX_GLOBAL_NORM = 0.5
+POLICY_LAYER_SIZES = [256, 256]
+CRITIC_LAYER_SIZES = [256, 256]
 # ENV_NAME = "ma_gym:Switch2-v0"
 ENV_NAME = "LunarLanderContinuous-v2"
+ALGORITHM = "ddpg-continuous"
 
 MASTER_PRNGKEY = jax.random.PRNGKey(2022)
 MASTER_PRNGKEY, networks_key, actors_key, buffer_key = jax.random.split(MASTER_PRNGKEY, 4)
 
 env = gym.make(
     ENV_NAME,     
+)
+
+logger = WandbLogger(
+    exp_config={
+        "algorithm": ALGORITHM,
+        "env_name": ENV_NAME,
+        "max_replay_size": MAX_REPLAY_SIZE,
+        "min_replay_size": MIN_REPLAY_SIZE, 
+        "policy_lr": POLICY_LR, 
+        "critic_lr": CRITIC_LR, 
+        "gamma": DISCOUNT_GAMMA, 
+        "batch_size": BATCH_SIZE, 
+        "train_every": TRAIN_EVERY, 
+        "polyak_value": POLYAK_UPDATE_VALUE,
+        "add_noise_train": False,  
+        "policy_layer_sizes": POLICY_LAYER_SIZES, 
+        "critic_layer_sizes": CRITIC_LAYER_SIZES, 
+        },  
 )
 # env = CentralControllerWrapper(env)
 
@@ -61,12 +85,21 @@ num_actions = env.action_space.shape[0]
 action_space_low = env.action_space.low 
 action_space_high = env.action_space.high
 
+
+def polyak_update(target_params, online_params, tau=0.005): 
+
+    new_target_params = jax.tree_util.tree_map(
+      lambda target, online: tau * online + (1.0 - tau) * target,
+      target_params, online_params)
+    
+    return new_target_params
+
 # Make networks 
 
 def make_networks(
     num_actions: int, 
-    policy_layer_sizes: list = [64, 64],
-    critic_layer_sizes: list = [64, 64]):
+    policy_layer_sizes: list = POLICY_LAYER_SIZES,
+    critic_layer_sizes: list = CRITIC_LAYER_SIZES):
 
     @hk.without_apply_rng
     @hk.transform
@@ -107,10 +140,19 @@ network_params = NetworkParams(
 )
 
 # Create optimisers and states
-policy_optimiser = optax.adam(POLICY_LR)
-policy_optimiser_state = policy_optimiser.init(policy_params)
+# policy_optimiser = optax.chain(
+#       optax.clip_by_global_norm(MAX_GLOBAL_NORM),
+#       optax.adam(learning_rate = POLICY_LR, eps = ADAM_EPS),
+#     )
+# critic_optimiser = optax.chain(
+#     optax.clip_by_global_norm(MAX_GLOBAL_NORM),
+#     optax.adam(learning_rate = CRITIC_LR, eps = ADAM_EPS),
+#     )
 
+policy_optimiser = optax.adam(POLICY_LR)
 critic_optimiser = optax.adam(CRITIC_LR)
+
+policy_optimiser_state = policy_optimiser.init(policy_params)
 critic_optimiser_state = critic_optimiser.init(critic_params)
 
 # Better idea is probably a high level Policy and Critic state. 
@@ -129,6 +171,7 @@ buffer_state = create_buffer(
     num_envs=1, 
     observation_dim=observation_dim, 
     action_dim=num_actions, 
+    action_dtype=jnp.float32,
 )
 
 system_state = DQNSystemState(
@@ -166,11 +209,18 @@ def critic_loss(
     dones, 
     next_states, 
     target_critic_params, 
-    target_policy_params, ):
+    target_policy_params, 
+    network_key, ):
     
-    # Doesn't look like it should be clipped? 
-    # NOTE: Look into this. 
+    # Add noise during training?
+    batch_dim = states.shape[0]
+    net_keys = jax.random.split(network_key, batch_dim)
+
     target_actions = jax.vmap(policy_network.apply, in_axes=(None, 0))(target_policy_params, next_states)
+
+    # Add noise to actions
+    # _, target_actions = jax.vmap(add_action_noise)(action=target_actions, actors_key=net_keys)
+
     target_state_actions = jnp.concatenate((next_states, target_actions), axis=1)
     target_action_values = jax.vmap(critic_network.apply, in_axes=(None, 0))(target_critic_params, target_state_actions)
     target_action_values = jnp.squeeze(target_action_values)
@@ -229,13 +279,19 @@ def update_critic(system_state: DQNSystemState, sampled_batch: DQNBufferData):
         target_critic_params,
         target_policy_params,  
     )
- 
-    target_critic_params = optax.incremental_update(
-            target_critic_params, critic_params, POLYAK_UPDATE_VALUE, 
-        )
 
     updates, new_critic_optimiser_state = critic_optimiser.update(grads, critic_optimiser_state)
     new_critic_params = optax.apply_updates(critic_params, updates)
+
+    # Update params, then polyak average. 
+    # target_critic_params = optax.incremental_update(
+    #         new_critic_params, target_critic_params, POLYAK_UPDATE_VALUE, 
+    #     )
+
+    target_critic_params = polyak_update(
+        target_params=target_critic_params, 
+        online_params=new_critic_params, 
+        tau=POLYAK_UPDATE_VALUE)
 
     system_state.optimiser_states.critic_state = new_critic_optimiser_state
     system_state.network_params.critic_params = new_critic_params
@@ -260,12 +316,17 @@ def update_policy(system_state: DQNSystemState, sampled_batch: DQNBufferData):
         critic_params,   
     )
 
-    target_policy_params = optax.incremental_update(
-            target_policy_params, policy_params, POLYAK_UPDATE_VALUE, 
-        )
-
     updates, new_policy_optimiser_state = policy_optimiser.update(grads, policy_optimiser_state)
     new_policy_params = optax.apply_updates(policy_params, updates)
+
+    # target_policy_params = optax.incremental_update(
+    #         new_policy_params, target_policy_params, POLYAK_UPDATE_VALUE, 
+    #     )
+
+    target_policy_params = polyak_update(
+        target_params=target_policy_params, 
+        online_params=new_policy_params, 
+        tau=POLYAK_UPDATE_VALUE)
 
     system_state.optimiser_states.policy_state = new_policy_optimiser_state
     system_state.network_params.policy_params = new_policy_params
@@ -273,9 +334,82 @@ def update_policy(system_state: DQNSystemState, sampled_batch: DQNBufferData):
 
     return system_state
 
+# @jax.jit
+# @chex.assert_max_traces(n=1)
+def update(system_state: DQNSystemState, sampled_batch: DQNBufferData): 
+
+    # Data
+    states = jnp.squeeze(sampled_batch.state)
+    actions = jnp.squeeze(sampled_batch.action)
+    rewards = jnp.squeeze(sampled_batch.reward)
+    dones = jnp.squeeze(sampled_batch.done)
+    next_states = jnp.squeeze(sampled_batch.next_state)
+
+    # Current params
+    critic_params = system_state.network_params.critic_params
+    policy_params = system_state.network_params.policy_params
+    target_critic_params = system_state.network_params.target_critic_params
+    target_policy_params = system_state.network_params.target_policy_params
+
+    policy_optimiser_state = system_state.optimiser_states.policy_state
+    critic_optimiser_state = system_state.optimiser_states.critic_state
+
+    networks_key = system_state.networks_key
+    networks_key, train_key = jax.random.split(networks_key)
+    system_state.networks_key = networks_key
+
+    # Update the critic
+    critic_grads = jax.grad(critic_loss)(
+        critic_params, 
+        states, 
+        actions, 
+        rewards, 
+        dones, 
+        next_states, 
+        target_critic_params,
+        target_policy_params,  
+        train_key, 
+    )
+
+    critic_updates, new_critic_optimiser_state = critic_optimiser.update(critic_grads, critic_optimiser_state)
+    new_critic_params = optax.apply_updates(critic_params, critic_updates)
+
+    # Update the policy
+    policy_grads = jax.grad(policy_loss)(
+        policy_params, 
+        states, 
+        critic_params,   
+    )
+
+    policy_updates, new_policy_optimiser_state = policy_optimiser.update(policy_grads, policy_optimiser_state)
+    new_policy_params = optax.apply_updates(policy_params, policy_updates)
+
+    # Update target nets
+    target_critic_params = polyak_update(
+        target_params=target_critic_params, 
+        online_params=new_critic_params, 
+        tau=POLYAK_UPDATE_VALUE)
+    
+    target_policy_params = polyak_update(
+        target_params=target_policy_params, 
+        online_params=new_policy_params, 
+        tau=POLYAK_UPDATE_VALUE)
+    
+    # Set new parameters in system state 
+    system_state.network_params.critic_params = new_critic_params
+    system_state.network_params.policy_params = new_policy_params
+    system_state.network_params.target_critic_params = target_critic_params
+    system_state.network_params.target_policy_params = target_policy_params
+
+    system_state.optimiser_states.policy_state = new_policy_optimiser_state
+    system_state.optimiser_states.critic_state = new_critic_optimiser_state
+    
+    return system_state
+
+
 global_step = 0
 episode = 0 
-while global_step < 200_000: 
+while global_step < 500_000: 
 
     done = False 
     obs = env.reset()
@@ -316,9 +450,19 @@ while global_step < 200_000:
             buffer_state = system_state.buffer
             buffer_state, sampled_data = sample_batch(buffer_state)
             system_state.buffer = buffer_state
-            system_state = update_critic(system_state, sampled_data)
-            system_state = update_policy(system_state, sampled_data)   
+            # system_state = update_critic(system_state, sampled_data)
+            # system_state = update_policy(system_state, sampled_data)   
+            system_state = update(system_state, sampled_data)
     
+    episode_results = {
+        "episode": episode, 
+        "episode_return": episode_return,
+        "global_step": global_step
+    }
+
+    logger.write(logging_details=episode_results, step=global_step)
     episode += 1
-    if episode % 10 == 0: 
+    if episode % 50 == 0: 
         print(f"EPISODE: {episode}, GLOBAL_STEP: {global_step}, EPISODE_RETURN: {episode_return}")   
+
+logger.close()
