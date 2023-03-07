@@ -10,6 +10,7 @@ import chex
 from utils.loggers import WandbLogger
 import time 
 import copy 
+from typing import Optional
 
 from utils.types import (
     DQNBufferData,
@@ -35,10 +36,10 @@ import gym
 
 # Constants: 
 MAX_REPLAY_SIZE = 500_000
-MIN_REPLAY_SIZE = 25_000
+MIN_REPLAY_SIZE = 1_000
 BATCH_SIZE = 64
-TRAIN_EVERY = 50
-POLYAK_UPDATE_VALUE = 0.001
+TRAIN_EVERY = 100
+POLYAK_UPDATE_VALUE = 0.01
 POLICY_LR = 0.0005
 CRITIC_LR = 0.0005
 DISCOUNT_GAMMA = 0.99 
@@ -53,7 +54,7 @@ ALGORITHM = "ddpg-discrete"
 MASTER_PRNGKEY = jax.random.PRNGKey(2022)
 MASTER_PRNGKEY, networks_key, actors_key, buffer_key = jax.random.split(MASTER_PRNGKEY, 4)
 
-LOG = True
+LOG = False
 
 env = gym.make(
     ENV_NAME,     
@@ -95,6 +96,22 @@ def polyak_update(target_params, online_params, tau=0.005):
 
 # Make networks 
 
+class DDPGCritic(hk.Module): 
+
+    def __init__(self, layer_sizes: list = [32, 32], name: Optional[str] = None): 
+
+        super().__init__(name=name)
+        self._q_network = hk.nets.MLP(layer_sizes + [1])
+
+    def __call__(self, state: jnp.ndarray, action:jnp.ndarray): 
+
+        state_action = jnp.concatenate((state, action))
+
+        q_value = self._q_network(state_action)
+
+        return q_value
+    
+
 def make_networks(
     num_actions: int, 
     policy_layer_sizes: list = POLICY_LAYER_SIZES,
@@ -108,11 +125,11 @@ def make_networks(
 
     @hk.without_apply_rng
     @hk.transform
-    def critic_network(x):
+    def critic_network(state, action):
         
         # NOTE: Might be a better way to do this. 
         # But concatenating outside the network for now. 
-        return hk.nets.MLP(critic_layer_sizes + [1])(x) 
+        return DDPGCritic(layer_sizes=critic_layer_sizes)(state, action) 
 
     return policy_network, critic_network 
 
@@ -129,7 +146,7 @@ networks_key, policy_init_key, critic_init_key = jax.random.split(networks_key, 
 
 policy_params = policy_network.init(policy_init_key, dummy_obs_data)
 critic_params = critic_network.init(
-    critic_init_key, jnp.concatenate((dummy_obs_data, dummy_action_data)))
+    critic_init_key, dummy_obs_data, dummy_action_data)
 
 network_params = NetworkParams(
     policy_params=policy_params, 
@@ -230,12 +247,10 @@ def critic_loss(
     train_keys = jax.random.split(train_key, batch_size)
 
     _, target_actions, _ = jax.vmap(select_action, in_axes=(0, 0))(logits, train_keys)
-    target_state_actions = jnp.concatenate((next_states, target_actions), axis=1)
-    target_action_values = jax.vmap(critic_network.apply, in_axes=(None, 0))(target_critic_params, target_state_actions)
+    target_action_values = jax.vmap(critic_network.apply, in_axes=(None, 0, 0))(target_critic_params, next_states, target_actions)
     target_action_values = jnp.squeeze(target_action_values)
 
-    online_state_actions = jnp.concatenate((states, actions), axis=1)
-    online_action_values = jax.vmap(critic_network.apply, in_axes=(None, 0))(critic_params, online_state_actions)
+    online_action_values = jax.vmap(critic_network.apply, in_axes=(None, 0, 0))(critic_params, states, actions)
     online_action_values = jnp.squeeze(online_action_values)
     
     bellman_target = rewards + DISCOUNT_GAMMA * (1 - dones) * target_action_values
@@ -262,10 +277,9 @@ def policy_loss(
     # Should there be gumbel noise here? 
     _, online_hard_actions, online_soft_actions = jax.vmap(select_action, in_axes=(0, 0))(logits, train_keys)
     
-    train_actions = online_hard_actions -jax.lax.stop_gradient(online_soft_actions) + online_soft_actions
-    online_state_actions = jnp.concatenate((states, train_actions), axis=1) 
+    train_actions = online_hard_actions -jax.lax.stop_gradient(online_soft_actions) + online_soft_actions 
 
-    online_action_values = jax.vmap(critic_network.apply, in_axes=(None, 0))(critic_params, online_state_actions)
+    online_action_values = jax.vmap(critic_network.apply, in_axes=(None, 0, 0))(critic_params, states, train_actions)
     online_action_values = jnp.squeeze(online_action_values)
 
     loss = -jnp.mean(online_action_values)
@@ -350,8 +364,8 @@ def update_policy(system_state: DQNSystemState, sampled_batch: DQNBufferData):
 
     return system_state
 
-# @jax.jit
-# @chex.assert_max_traces(n=1)
+@jax.jit
+@chex.assert_max_traces(n=1)
 def update(system_state: DQNSystemState, sampled_batch: DQNBufferData): 
 
     # Data
@@ -403,12 +417,12 @@ def update(system_state: DQNSystemState, sampled_batch: DQNBufferData):
     # Update target nets
     target_critic_params = polyak_update(
         target_params=target_critic_params, 
-        online_params=new_critic_params, 
+        online_params=critic_params, 
         tau=POLYAK_UPDATE_VALUE)
     
     target_policy_params = polyak_update(
         target_params=target_policy_params, 
-        online_params=new_policy_params, 
+        online_params=policy_params, 
         tau=POLYAK_UPDATE_VALUE)
 
     # Set new parameters in system state 
