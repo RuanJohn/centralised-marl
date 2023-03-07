@@ -7,6 +7,7 @@ import haiku as hk
 import optax
 import rlax
 import chex
+import time
 
 from utils.types import (
     DQNBufferData,
@@ -43,8 +44,8 @@ CRITIC_LR = 0.001
 ADAM_EPS=1e-5
 DISCOUNT_GAMMA = 0.99 
 MAX_GLOBAL_NORM = 0.5
-POLICY_LAYER_SIZES = [256, 256]
-CRITIC_LAYER_SIZES = [256, 256]
+POLICY_LAYER_SIZES = [64, 64]
+CRITIC_LAYER_SIZES = [64, 64]
 # ENV_NAME = "ma_gym:Switch2-v0"
 ENV_NAME = "LunarLanderContinuous-v2"
 ALGORITHM = "ddpg-continuous"
@@ -52,27 +53,30 @@ ALGORITHM = "ddpg-continuous"
 MASTER_PRNGKEY = jax.random.PRNGKey(2022)
 MASTER_PRNGKEY, networks_key, actors_key, buffer_key = jax.random.split(MASTER_PRNGKEY, 4)
 
+LOG = False
+
 env = gym.make(
     ENV_NAME,     
 )
 
-logger = WandbLogger(
-    exp_config={
-        "algorithm": ALGORITHM,
-        "env_name": ENV_NAME,
-        "max_replay_size": MAX_REPLAY_SIZE,
-        "min_replay_size": MIN_REPLAY_SIZE, 
-        "policy_lr": POLICY_LR, 
-        "critic_lr": CRITIC_LR, 
-        "gamma": DISCOUNT_GAMMA, 
-        "batch_size": BATCH_SIZE, 
-        "train_every": TRAIN_EVERY, 
-        "polyak_value": POLYAK_UPDATE_VALUE,
-        "add_noise_train": False,  
-        "policy_layer_sizes": POLICY_LAYER_SIZES, 
-        "critic_layer_sizes": CRITIC_LAYER_SIZES, 
-        },  
-)
+if LOG: 
+    logger = WandbLogger(
+        exp_config={
+            "algorithm": ALGORITHM,
+            "env_name": ENV_NAME,
+            "max_replay_size": MAX_REPLAY_SIZE,
+            "min_replay_size": MIN_REPLAY_SIZE, 
+            "policy_lr": POLICY_LR, 
+            "critic_lr": CRITIC_LR, 
+            "gamma": DISCOUNT_GAMMA, 
+            "batch_size": BATCH_SIZE, 
+            "train_every": TRAIN_EVERY, 
+            "polyak_value": POLYAK_UPDATE_VALUE,
+            "add_noise_train": False,  
+            "policy_layer_sizes": POLICY_LAYER_SIZES, 
+            "critic_layer_sizes": CRITIC_LAYER_SIZES, 
+            },  
+    )
 # env = CentralControllerWrapper(env)
 
 observation_dim = env.observation_space.shape[0]
@@ -139,16 +143,6 @@ network_params = NetworkParams(
     target_critic_params=critic_params,  
 )
 
-# Create optimisers and states
-# policy_optimiser = optax.chain(
-#       optax.clip_by_global_norm(MAX_GLOBAL_NORM),
-#       optax.adam(learning_rate = POLICY_LR, eps = ADAM_EPS),
-#     )
-# critic_optimiser = optax.chain(
-#     optax.clip_by_global_norm(MAX_GLOBAL_NORM),
-#     optax.adam(learning_rate = CRITIC_LR, eps = ADAM_EPS),
-#     )
-
 policy_optimiser = optax.adam(POLICY_LR)
 critic_optimiser = optax.adam(CRITIC_LR)
 
@@ -182,8 +176,6 @@ system_state = DQNSystemState(
     optimiser_states=optimiser_states, 
 )
 
-# @jax.jit
-# @chex.assert_max_traces(n=1)
 def add_action_noise(
     action, 
     actors_key,
@@ -199,8 +191,6 @@ def add_action_noise(
 
     return actors_key, action
 
-# @jax.jit
-# @chex.assert_max_traces(n=1)
 def critic_loss(
     critic_params, 
     states, 
@@ -209,21 +199,20 @@ def critic_loss(
     dones, 
     next_states, 
     target_critic_params, 
-    target_policy_params, 
-    network_key, ):
+    target_policy_params, ):
     
     # Add noise during training?
-    batch_dim = states.shape[0]
-    net_keys = jax.random.split(network_key, batch_dim)
 
     target_actions = jax.vmap(policy_network.apply, in_axes=(None, 0))(target_policy_params, next_states)
-
-    # Add noise to actions
-    # _, target_actions = jax.vmap(add_action_noise)(action=target_actions, actors_key=net_keys)
 
     target_state_actions = jnp.concatenate((next_states, target_actions), axis=1)
     target_action_values = jax.vmap(critic_network.apply, in_axes=(None, 0))(target_critic_params, target_state_actions)
     target_action_values = jnp.squeeze(target_action_values)
+
+    # TODO: Make this an if statement 
+    # or handle in a better way. 
+    # Optional action expand for action dim = 1: 
+    # actions = jnp.expand_dims(actions, axis=1)
 
     online_state_actions = jnp.concatenate((states, actions), axis=1)
     online_action_values = jax.vmap(critic_network.apply, in_axes=(None, 0))(critic_params, online_state_actions)
@@ -232,7 +221,6 @@ def critic_loss(
     bellman_target = rewards + DISCOUNT_GAMMA * (1 - dones) * target_action_values
     bellman_target = jax.lax.stop_gradient(bellman_target)
     td_error = (online_action_values - bellman_target) 
-
 
     loss = jnp.mean(rlax.l2_loss(td_error))
     
@@ -244,6 +232,7 @@ def policy_loss(
     critic_params, ):
 
     online_actions = jax.vmap(policy_network.apply, in_axes=(None, 0))(policy_params, states)
+
     online_state_actions = jnp.concatenate((states, online_actions), axis=1) 
 
     online_action_values = jax.vmap(critic_network.apply, in_axes=(None, 0))(critic_params, online_state_actions)
@@ -334,8 +323,8 @@ def update_policy(system_state: DQNSystemState, sampled_batch: DQNBufferData):
 
     return system_state
 
-# @jax.jit
-# @chex.assert_max_traces(n=1)
+@jax.jit
+@chex.assert_max_traces(n=1)
 def update(system_state: DQNSystemState, sampled_batch: DQNBufferData): 
 
     # Data
@@ -354,10 +343,6 @@ def update(system_state: DQNSystemState, sampled_batch: DQNBufferData):
     policy_optimiser_state = system_state.optimiser_states.policy_state
     critic_optimiser_state = system_state.optimiser_states.critic_state
 
-    networks_key = system_state.networks_key
-    networks_key, train_key = jax.random.split(networks_key)
-    system_state.networks_key = networks_key
-
     # Update the critic
     critic_grads = jax.grad(critic_loss)(
         critic_params, 
@@ -367,8 +352,7 @@ def update(system_state: DQNSystemState, sampled_batch: DQNBufferData):
         dones, 
         next_states, 
         target_critic_params,
-        target_policy_params,  
-        train_key, 
+        target_policy_params,
     )
 
     critic_updates, new_critic_optimiser_state = critic_optimiser.update(critic_grads, critic_optimiser_state)
@@ -406,6 +390,15 @@ def update(system_state: DQNSystemState, sampled_batch: DQNBufferData):
     
     return system_state
 
+@jax.jit
+@chex.assert_max_traces(n=1)
+def actor_step(obs, policy_params, actors_key): 
+
+    action = policy_network.apply(policy_params, obs)
+    actors_key, action = add_action_noise(action, actors_key)
+
+    return action, actors_key
+
 
 global_step = 0
 episode = 0 
@@ -414,18 +407,23 @@ while global_step < 500_000:
     done = False 
     obs = env.reset()
     episode_return = 0
+    episode_steps = 0 
+    start_time = time.time()
     while not done: 
 
-        action = policy_network.apply(system_state.network_params.policy_params, obs)
+        action, actors_key = actor_step(
+            obs=obs,
+            policy_params=system_state.network_params.policy_params, 
+            actors_key=system_state.actors_key 
+        )
 
-        actors_key = system_state.actors_key
-        actors_key, action = add_action_noise(action, actors_key)
         system_state.actors_key = actors_key
 
         # Covert action to int in order to step the env. 
         # Can also handle in the wrapper
         obs_, reward, done, _ = env.step(action.tolist())
         global_step += 1 # TODO: With vec envs this should be more. 
+        episode_steps += 1
 
         # NB: Correct shapes here. 
         data = DQNBufferData(
@@ -446,23 +444,33 @@ while global_step < 500_000:
         
         if can_sample(system_state.buffer) and (global_step % TRAIN_EVERY == 0): 
             
-            # Can do multiple updates here. 
-            buffer_state = system_state.buffer
-            buffer_state, sampled_data = sample_batch(buffer_state)
-            system_state.buffer = buffer_state
-            # system_state = update_critic(system_state, sampled_data)
-            # system_state = update_policy(system_state, sampled_data)   
-            system_state = update(system_state, sampled_data)
+            print("TRAINING")
+            # Can do multiple updates here.
+            for _ in range(4): 
+                buffer_state = system_state.buffer
+                buffer_state, sampled_data = sample_batch(buffer_state)
+                system_state.buffer = buffer_state
+
+                # TODO: Set an if statement to handle separate updates or one update 
+                # function. 
+                # system_state = update_critic(system_state, sampled_data)
+                # system_state = update_policy(system_state, sampled_data)   
+                system_state = update(system_state, sampled_data)
     
+    steps_per_second = episode_steps / (time.time() - start_time)
+
     episode_results = {
         "episode": episode, 
         "episode_return": episode_return,
-        "global_step": global_step
+        "global_step": global_step,
+        "steps_per_second": steps_per_second, 
     }
 
-    logger.write(logging_details=episode_results, step=global_step)
+    if LOG: 
+        logger.write(logging_details=episode_results, step=global_step)
     episode += 1
-    if episode % 50 == 0: 
+    print(f"STEPS PER SECOND: {steps_per_second}")
+    if episode % 1 == 0: 
         print(f"EPISODE: {episode}, GLOBAL_STEP: {global_step}, EPISODE_RETURN: {episode_return}")   
 
 logger.close()
