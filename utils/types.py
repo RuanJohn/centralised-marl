@@ -74,6 +74,10 @@ class DQNBufferState:
     batch_size: jnp.int32
     counter: jnp.int32 
     key: chex.PRNGKey
+    t: jnp.int32 = None 
+    sequence_length: jnp.int32 = None 
+    masks: jnp.ndarray = None 
+    policy_hidden_states: jnp.ndarray = None 
 
 @chex.dataclass
 class DQNBufferData: 
@@ -82,6 +86,8 @@ class DQNBufferData:
     reward: jnp.ndarray 
     done: jnp.ndarray
     next_state: jnp.ndarray
+    policy_hidden_state: jnp.ndarray = None
+    mask: jnp.ndarray = None
 
 @chex.dataclass
 class DQNSystemState: 

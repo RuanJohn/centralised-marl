@@ -23,7 +23,7 @@ from utils.sequence_replay_buffer import (
     sample_batch, 
 )
 
-add = jax.jit(add)
+# add = jax.jit(add)
 
 from utils.array_utils import (
     add_two_leading_dims,
