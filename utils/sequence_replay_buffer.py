@@ -79,7 +79,7 @@ def add(
     t += 1
 
     counter, t = jax.lax.cond(
-        (buffer_state.t == buffer_state.sequence_length) or (jnp.squeeze(data.done) == True), 
+        (buffer_state.t == buffer_state.sequence_length) | (jnp.squeeze(data.done) == True), 
         lambda counter, t: (counter + 1, jnp.int32(0)), 
         lambda counter, t: (counter, t),
         counter, 

@@ -23,7 +23,7 @@ from utils.sequence_replay_buffer import (
     sample_batch, 
 )
 
-# add = jax.jit(add)
+add = jax.jit(chex.assert_max_traces(add, n=1))
 
 from utils.array_utils import (
     add_two_leading_dims,
@@ -35,11 +35,11 @@ import gym
 
 # Constants: 
 MAX_REPLAY_SIZE = 200_000
-MIN_REPLAY_SIZE = 5
-BATCH_SIZE = 2
+MIN_REPLAY_SIZE = 200
+BATCH_SIZE = 32
 SEQUENCE_LENGTH = 10
-TARGET_UPDATE_PERIOD = 500
-TRAIN_EVERY = 20
+TARGET_UPDATE_PERIOD = 50
+TRAIN_EVERY = 50
 POLICY_LR = 0.005
 DISCOUNT_GAMMA = 0.99 
 MAX_GLOBAL_NORM = 0.5
@@ -47,7 +47,7 @@ EPSILON = 1.0
 MIN_EPSILON = 0.05 
 EPSILON_DECAY_STEPS = 10_00
 EPSILON_DECAY_RATE = 0.9995
-POLICY_RECURRENT_LAYER_SIZES = [16]
+POLICY_RECURRENT_LAYER_SIZES = [32]
 POLICY_LAYER_SIZES = [16]
 # ENV_NAME = "ma_gym:Switch2-v0"
 ENV_NAME = "CartPole-v0"
@@ -99,9 +99,10 @@ def make_networks(
 
         return hk.DeepRNN(
             [
-            hk.nets.MLP(policy_layer_sizes, activate_final=True), 
+            # hk.nets.MLP(policy_layer_sizes, activate_final=True), 
             hk.GRU(policy_recurrent_layer_sizes[0]), 
             # hk.GRU(policy_recurrent_layer_sizes[1]), 
+            # hk.nets.MLP(policy_layer_sizes, activate_final=True), 
             hk.Linear(num_actions),
             ]
             )(x, y) 
@@ -161,6 +162,7 @@ system_state = DQNSystemState(
     networks_key=networks_key, 
     network_params=network_params, 
     optimiser_states=optimiser_states, 
+    training_iterations=jnp.int32(0)
 ) 
 
 # NB must sample randomly like this. 
@@ -224,7 +226,8 @@ def dqn_loss(
         return policy_network.apply(target_policy_params, state, hidden_state)
 
     policy_hidden_states = policy_hidden_states[:, 0, :, :]
-    zero_hidden_states = jnp.zeros_like(policy_hidden_states)
+    policy_hidden_states = jnp.zeros_like(policy_hidden_states)
+    # zero_hidden_states = jnp.zeros_like(policy_hidden_states)
 
     q_values, _ = hk.static_unroll(
         core_online, 
@@ -236,7 +239,14 @@ def dqn_loss(
     target_q_values, _ = hk.static_unroll(
         core_target, 
         next_states, 
-        zero_hidden_states, 
+        policy_hidden_states, 
+        time_major=False, 
+    )
+
+    selector_q_values, _ = hk.static_unroll(
+        core_online, 
+        next_states, 
+        policy_hidden_states, 
         time_major=False, 
     )
     
@@ -264,9 +274,11 @@ def dqn_loss(
         a_tm1=actions, 
         r_t=rewards, 
         discount_t=(1 - dones) * DISCOUNT_GAMMA,
-        q_t=target_q_values
+        q_t=target_q_values,
+        # q_t_selector=selector_q_values, 
     )
     
+    # Mask the td error 
     td_error = td_error * masks 
 
     loss = jnp.sum(rlax.l2_loss(td_error)) / jnp.sum(masks)
@@ -293,9 +305,9 @@ def update_policy(system_state: DQNSystemState, sampled_batch: DQNBufferData, gl
     target_policy_params = system_state.network_params.target_policy_params
 
     # NB here. TARGET_UPDATE_PERIOD must be divisble by TRAIN_EVERY. 
-    # target_policy_params = optax.periodic_update(
-    #         policy_params, target_policy_params, global_step, TARGET_UPDATE_PERIOD
-    #     )
+    target_policy_params = optax.periodic_update(
+            policy_params, target_policy_params, system_state.training_iterations, TARGET_UPDATE_PERIOD
+        )
     
     grads = jax.grad(dqn_loss)(
         policy_params, 
@@ -316,6 +328,8 @@ def update_policy(system_state: DQNSystemState, sampled_batch: DQNBufferData, gl
     system_state.network_params.policy_params = new_policy_params
     system_state.network_params.target_policy_params = target_policy_params
 
+    system_state.training_iterations += 1
+
     return system_state
 
 global_step = 0.0
@@ -328,11 +342,12 @@ while global_step < 50_000:
     policy_hidden_state = create_hidden_states()
     while not done: 
 
-        q_values, policy_hidden_state = policy_network.apply(system_state.network_params.policy_params, obs, policy_hidden_state)
+        q_values, new_policy_hidden_state = policy_network.apply(system_state.network_params.policy_params, obs, policy_hidden_state)
 
+        new_policy_hidden_state = jnp.expand_dims(new_policy_hidden_state[0], axis=0)
         if should_train(system_state.buffer): 
-        #     EPSILON = jnp.maximum(EPSILON * EPSILON_DECAY_RATE, 0.05)
-            EPSILON = epsilon_schedule(global_step)
+            EPSILON = jnp.maximum(EPSILON * EPSILON_DECAY_RATE, 0.05)
+            # EPSILON = epsilon_schedule(global_step)
 
         actors_key = system_state.actors_key
         actors_key, action = choose_action(actors_key, q_values, EPSILON)
@@ -354,19 +369,13 @@ while global_step < 50_000:
         )
 
         obs = obs_ 
+        policy_hidden_state = new_policy_hidden_state
 
         buffer_state = system_state.buffer 
         buffer_state = add(buffer_state, data)
         system_state.buffer = buffer_state
 
         episode_return += reward
-
-        system_state.network_params.target_policy_params = optax.periodic_update(
-            system_state.network_params.policy_params, 
-            system_state.network_params.target_policy_params, 
-            global_step, 
-            TARGET_UPDATE_PERIOD
-            )
          
         if should_train(system_state.buffer) and (global_step % TRAIN_EVERY == 0): 
 
