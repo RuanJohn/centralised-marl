@@ -96,3 +96,4 @@ class DQNSystemState:
     networks_key: chex.PRNGKey
     network_params: NetworkParams
     optimiser_states: OptimiserStates
+    training_iterations: jnp.int32

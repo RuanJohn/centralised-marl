@@ -8,6 +8,7 @@ import haiku as hk
 import optax
 import rlax
 import chex
+from utils.loggers import WandbLogger
 
 from utils.types import (
     DQNBufferData,
@@ -23,6 +24,8 @@ from utils.dqn_replay_buffer import (
     can_sample,
 )
 
+add = jax.jit(chex.assert_max_traces(add, n=1))
+
 from utils.array_utils import (
     add_two_leading_dims,
 )
@@ -35,23 +38,40 @@ import gym
 MAX_REPLAY_SIZE = 200_000
 MIN_REPLAY_SIZE = 1_000
 BATCH_SIZE = 128
-TARGET_UPDATE_PERIOD = 500
-TRAIN_EVERY = 20
+# Training iterations before target update. 
+TARGET_UPDATE_PERIOD = 200 
+TRAIN_EVERY = 50
 POLICY_LR = 0.005
 DISCOUNT_GAMMA = 0.99 
 MAX_GLOBAL_NORM = 0.5
 EPSILON = 1.0 
 MIN_EPSILON = 0.05 
 EPSILON_DECAY_STEPS = 10_000
-EPSILON_DECAY_RATE = 0.9995
-# ENV_NAME = "ma_gym:Switch2-v0"
-ENV_NAME = "CartPole-v0"
+EPSILON_DECAY_RATE = 0.99995
+ENV_NAME = "ma_gym:Switch2-v0"
+# ENV_NAME = "CartPole-v0"
 
 MASTER_PRNGKEY = jax.random.PRNGKey(2022)
 MASTER_PRNGKEY, networks_key, actors_key, buffer_key = jax.random.split(MASTER_PRNGKEY, 4)
 
+ALGORITHM = "ff_central_dqn"
+LOG = True
+
+# TODO: Add more exp details later on. 
+if LOG: 
+    logger = WandbLogger(
+        exp_config={
+        "algorithm": ALGORITHM,
+        "env_name": ENV_NAME,
+        "policy_lr": POLICY_LR,  
+        "gamma": DISCOUNT_GAMMA, 
+        "max_global_norm": MAX_GLOBAL_NORM,
+        },  
+    )
+
+
 env = gym.make(ENV_NAME)
-# env = CentralControllerWrapper(env)
+env = CentralControllerWrapper(env)
 
 observation_dim = env.observation_space.shape[0]
 num_actions = env.action_space.n
@@ -112,8 +132,9 @@ system_state = DQNSystemState(
     actors_key=actors_key, 
     networks_key=networks_key, 
     network_params=network_params, 
-    optimiser_states=optimiser_states, 
-) 
+    optimiser_states=optimiser_states,
+    training_iterations=jnp.int32(0) 
+)
 
 # NB must sample randomly like this. 
 def select_random_action(key, num_actions): 
@@ -193,11 +214,11 @@ def dqn_loss(
 
     loss = jnp.mean(rlax.l2_loss(td_error))
     
-    return loss
+    return loss, loss
 
 @jax.jit
 @chex.assert_max_traces(n=1)
-def update_policy(system_state: DQNSystemState, sampled_batch: DQNBufferData, global_step: int): 
+def update_policy(system_state: DQNSystemState, sampled_batch: DQNBufferData): 
 
     states = jnp.squeeze(sampled_batch.state)
     actions = jnp.squeeze(sampled_batch.action)
@@ -211,10 +232,10 @@ def update_policy(system_state: DQNSystemState, sampled_batch: DQNBufferData, gl
 
     # NB here. TARGET_UPDATE_PERIOD must be divisble by TRAIN_EVERY. 
     target_policy_params = optax.periodic_update(
-            policy_params, target_policy_params, global_step, TARGET_UPDATE_PERIOD
+            policy_params, target_policy_params, system_state.training_iterations, TARGET_UPDATE_PERIOD
         )
     
-    grads = jax.grad(dqn_loss)(
+    grads, loss = jax.grad(dqn_loss, has_aux=True)(
         policy_params, 
         states, 
         actions, 
@@ -230,12 +251,18 @@ def update_policy(system_state: DQNSystemState, sampled_batch: DQNBufferData, gl
     system_state.optimiser_states.policy_state = new_policy_optimiser_state
     system_state.network_params.policy_params = new_policy_params
     system_state.network_params.target_policy_params = target_policy_params
+    system_state.training_iterations += 1
 
-    return system_state
+    return system_state, loss
+
+def get_epsilon(step): 
+
+    pass
 
 global_step = 0
 episode = 0 
-while global_step < 50_000: 
+loss = None
+while global_step < 300_000: 
 
     done = False 
     obs = env.reset()
@@ -246,6 +273,7 @@ while global_step < 50_000:
         
         if can_sample(system_state.buffer): 
             EPSILON = jnp.maximum(EPSILON * EPSILON_DECAY_RATE, 0.05)
+            # EPSILON = get_epsilon(global_step)
 
         actors_key = system_state.actors_key
         actors_key, action = choose_action(actors_key, q_values, EPSILON)
@@ -278,9 +306,29 @@ while global_step < 50_000:
             buffer_state = system_state.buffer
             buffer_state, sampled_data = sample_batch(buffer_state)
             system_state.buffer = buffer_state
-            system_state = update_policy(system_state, sampled_data, global_step)
+            system_state, loss = update_policy(system_state, sampled_data)
 
+    if LOG: 
+        log_data = {
+            "episode": episode, 
+            "episode_return": episode_return, 
+            "global_step": global_step,
+        }
+
+        q_value_data = {
+            f"q_values_{i}": value for i, value in enumerate(q_values)
+        }
+
+        if loss is not None: 
+            log_data["q_network_loss"] = loss
+            loss = None
+
+        log_data.update(q_value_data)
+
+        logger.write(log_data)
     
     episode += 1
     if episode % 1 == 0: 
         print(f"EPISODE: {episode}, GLOBAL_STEP: {global_step}, EPISODE_RETURN: {episode_return}, EPSILON: {jnp.round(EPSILON, 2)}")   
+
+logger.close() 
