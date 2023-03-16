@@ -9,6 +9,7 @@ import optax
 import rlax
 import chex
 from utils.loggers import WandbLogger
+import time 
 
 from utils.types import (
     DQNBufferData,
@@ -24,7 +25,8 @@ from utils.dqn_replay_buffer import (
     can_sample,
 )
 
-add = jax.jit(chex.assert_max_traces(add, n=1))
+add = jax.jit(chex.assert_max_traces(add, n=1), donate_argnums=(0,))
+# add = jax.jit(chex.assert_max_traces(add, n=1))
 
 from utils.array_utils import (
     add_two_leading_dims,
@@ -48,8 +50,8 @@ EPSILON = 1.0
 MIN_EPSILON = 0.05 
 EPSILON_DECAY_STEPS = 10_000
 EPSILON_DECAY_RATE = 0.99995
-ENV_NAME = "ma_gym:Switch2-v0"
-# ENV_NAME = "CartPole-v0"
+# ENV_NAME = "ma_gym:Switch2-v0"
+ENV_NAME = "CartPole-v0"
 
 MASTER_PRNGKEY = jax.random.PRNGKey(2022)
 MASTER_PRNGKEY, networks_key, actors_key, buffer_key = jax.random.split(MASTER_PRNGKEY, 4)
@@ -71,7 +73,7 @@ if LOG:
 
 
 env = gym.make(ENV_NAME)
-env = CentralControllerWrapper(env)
+# env = CentralControllerWrapper(env)
 
 observation_dim = env.observation_space.shape[0]
 num_actions = env.action_space.n
@@ -267,6 +269,8 @@ while global_step < 300_000:
     done = False 
     obs = env.reset()
     episode_return = 0
+    episode_steps = 0
+    start_time = time.time()
     while not done: 
 
         q_values = policy_network.apply(system_state.network_params.policy_params, obs)
@@ -300,6 +304,7 @@ while global_step < 300_000:
         system_state.buffer = buffer_state
 
         episode_return += reward
+        episode_steps += 1
         
         if can_sample(system_state.buffer) and (global_step % TRAIN_EVERY == 0): 
             
@@ -307,6 +312,8 @@ while global_step < 300_000:
             buffer_state, sampled_data = sample_batch(buffer_state)
             system_state.buffer = buffer_state
             system_state, loss = update_policy(system_state, sampled_data)
+
+    steps_per_second = episode_steps / (time.time() - start_time)
 
     if LOG: 
         log_data = {
@@ -329,6 +336,6 @@ while global_step < 300_000:
     
     episode += 1
     if episode % 1 == 0: 
-        print(f"EPISODE: {episode}, GLOBAL_STEP: {global_step}, EPISODE_RETURN: {episode_return}, EPSILON: {jnp.round(EPSILON, 2)}")   
+        print(f"EPISODE: {episode}, GLOBAL_STEP: {global_step}, EPISODE_RETURN: {episode_return}, EPSILON: {jnp.round(EPSILON, 2)}, SPS: {int(steps_per_second)}")   
 
 logger.close() 
