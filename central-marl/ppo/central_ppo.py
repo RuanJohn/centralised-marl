@@ -9,6 +9,7 @@ import optax
 import distrax
 import rlax
 import chex
+import time
 
 from utils.types import (
     BufferData, 
@@ -24,6 +25,10 @@ from utils.replay_buffer import (
     reset_buffer,
     should_train,
 )
+
+# add = jax.jit(chex.assert_max_traces(add, n=1))
+# add = jax.jit(chex.assert_max_traces(add, n=1), donate_argnums=(0,))
+add = jax.jit(add)
 
 from utils.array_utils import (
     add_two_leading_dims,
@@ -48,13 +53,14 @@ MAX_GLOBAL_NORM = 0.5
 ADAM_EPS = 1e-5
 POLICY_LAYER_SIZES = [64, 64]
 CRITIC_LAYER_SIZES = [64, 64]
-ENV_NAME = "ma_gym:Switch4-v0"
-# ENV_NAME = "CartPole-v0"
+NORMALISE_ADVANTAGE = True
+ENV_NAME = "ma_gym:PredatorPrey5x5-v0"
+# ENV_NAME = "CartPole-v1"
 MASTER_PRNGKEY = jax.random.PRNGKey(2022)
 MASTER_PRNGKEY, networks_key, actors_key, buffer_key = jax.random.split(MASTER_PRNGKEY, 4)
 
 ALGORITHM = "ff_central_ppo"
-LOG = True 
+LOG = True
 
 if LOG: 
     logger = WandbLogger(
@@ -73,6 +79,7 @@ if LOG:
         "adam_epsilon": ADAM_EPS, 
         "policy_layer_sizes": POLICY_LAYER_SIZES, 
         "critic_layer_sizes": CRITIC_LAYER_SIZES, 
+        "normalise_advantage": NORMALISE_ADVANTAGE, 
         },  
     )
 
@@ -180,7 +187,9 @@ def policy_loss(
     states, 
     actions, 
     old_log_probs, 
-    advantages, ):
+    advantages, 
+    entropies, 
+    ):
 
     logits = policy_network.apply(policy_params, states)
     dist = distrax.Categorical(logits=logits)
@@ -193,7 +202,7 @@ def policy_loss(
     # Policy loss
     loss_term_1 = -advantages * ratio
     loss_term_2 = -advantages * jnp.clip(ratio, 1 - CLIP_EPSILON, 1 + CLIP_EPSILON)
-    loss = jnp.maximum(loss_term_1, loss_term_2).mean()
+    loss = jnp.maximum(loss_term_1, loss_term_2).mean() - 0.01 * jnp.mean(entropies)
 
     return loss
 
@@ -216,7 +225,11 @@ def update_policy(system_state: PPOSystemState, advantages, mb_idx):
     states = jnp.squeeze(system_state.buffer.states)[mb_idx]
     old_log_probs = jnp.squeeze(system_state.buffer.log_probs)[mb_idx]
     actions = jnp.squeeze(system_state.buffer.actions)[mb_idx]
+    entropies = jnp.squeeze(system_state.buffer.entropy)[mb_idx]
     advantages = advantages[mb_idx]
+
+    if NORMALISE_ADVANTAGE: 
+        advantages = (advantages - jnp.mean(advantages)) / (jnp.std(advantages) + 1e-5)
     
     policy_optimiser_state = system_state.optimiser_states.policy_state
     policy_params = system_state.network_params.policy_params
@@ -227,6 +240,7 @@ def update_policy(system_state: PPOSystemState, advantages, mb_idx):
         actions, 
         old_log_probs, 
         advantages,
+        entropies, 
     )
 
     updates, new_policy_optimiser_state = policy_optimiser.update(grads, policy_optimiser_state)
@@ -268,11 +282,13 @@ def update_critic(
 global_step = 0
 episode = 0 
 log_data = {}
-while global_step < 100_000: 
+while global_step < 200_000: 
 
     done = False 
     obs = env.reset()
     episode_return = 0
+    episode_steps = 0 
+    start_time = time.time()
     while not done: 
         
         logits = policy_network.apply(system_state.network_params.policy_params, obs)
@@ -304,12 +320,14 @@ while global_step < 100_000:
 
         obs = obs_ 
         episode_return += reward
+        episode_steps += 1
         
         if global_step % (HORIZON + 1) == 0: 
             
+            # TODO: Switch back to slicing [:-1]
             advantages = rlax.truncated_generalized_advantage_estimation(
-                r_t = jnp.squeeze(system_state.buffer.rewards)[:-1],
-                discount_t = (1 - jnp.squeeze(system_state.buffer.dones))[:-1] * DISCOUNT_GAMMA,
+                r_t = jnp.squeeze(system_state.buffer.rewards)[1:],
+                discount_t = (1 - jnp.squeeze(system_state.buffer.dones))[1:] * DISCOUNT_GAMMA,
                 lambda_ = GAE_LAMBDA, 
                 values = jnp.squeeze(system_state.buffer.values),
                 stop_target_gradients=True
@@ -317,7 +335,7 @@ while global_step < 100_000:
 
             advantages = jax.lax.stop_gradient(advantages)
             # Just not sure how to index the values here. 
-            returns = advantages + jnp.squeeze(system_state.buffer.values)[:-1]
+            returns = advantages + jnp.squeeze(system_state.buffer.values)[1:]
             returns = jax.lax.stop_gradient(returns)
 
 
@@ -339,6 +357,8 @@ while global_step < 100_000:
             buffer_state = reset_buffer(buffer_state) 
             system_state.buffer = buffer_state
     
+    sps = episode_steps / (time.time() - start_time)
+
     if LOG: 
         log_data["episode"] = episode
         log_data["episode_return"] = episode_return
@@ -347,4 +367,4 @@ while global_step < 100_000:
 
     episode += 1
     if episode % 10 == 0: 
-        print(f"EPISODE: {episode}, GLOBAL_STEP: {global_step}, EPISODE_RETURN: {episode_return}")   
+        print(f"EPISODE: {episode}, GLOBAL_STEP: {global_step}, EPISODE_RETURN: {episode_return}, SPS: {int(sps)}")   
