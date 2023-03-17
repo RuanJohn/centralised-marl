@@ -3,7 +3,7 @@ import gym
 
 class CentralControllerWrapper(gym.Env): 
     
-    def __init__(self, ma_env):
+    def __init__(self, ma_env, one_hot_ids: bool = False,):
         super().__init__()
         self.env = ma_env 
         self.num_agents = ma_env.n_agents 
@@ -12,6 +12,8 @@ class CentralControllerWrapper(gym.Env):
         full_obs_size = sum([len(i) for i in ma_env.reset()])
         self.observation_space = gym.spaces.Box(np.zeros(full_obs_size), np.ones(full_obs_size), (full_obs_size,), np.float32)
         self.metadata = {'render.modes': ['human', 'rgb_array']}
+        self.zero_agent_mask = np.zeros(ma_env.n_agents)
+        self._one_hot_ids = one_hot_ids 
 
     def reset(self, ):
         
@@ -46,7 +48,22 @@ class CentralControllerWrapper(gym.Env):
     def create_joint_obs(self, env_obs):
         
         array_obs = np.array(env_obs)
+        
+        # TODO: Vectorise this. 
+        if self._one_hot_ids: 
+            one_hot_ids = []
+            
+            for agent in range(self.num_agents): 
+                one_hot_mask = self.zero_agent_mask
+                one_hot_mask[agent] = 1.0
+                one_hot_ids.append(one_hot_mask)
+            
+            one_hot_ids = np.array(one_hot_ids)
+
         joint_obs = np.concatenate(array_obs, axis = -1)
+
+        if self._one_hot_ids:
+            joint_obs = np.concatenate((joint_obs, one_hot_ids), axis=0)
         
         return joint_obs
     
