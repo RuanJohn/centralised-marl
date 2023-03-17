@@ -8,6 +8,7 @@ import haiku as hk
 import optax
 import rlax
 import chex
+import time 
 
 from utils.types import (
     DQNBufferData,
@@ -23,7 +24,9 @@ from utils.sequence_replay_buffer import (
     sample_batch, 
 )
 
-add = jax.jit(chex.assert_max_traces(add, n=1))
+add = jax.jit(chex.assert_max_traces(add, n=1), donate_argnums=(0,))
+# add = jax.jit(chex.assert_max_traces(add, n=1))
+# add = jax.jit(add, donate_argnums=(0,))
 
 from utils.array_utils import (
     add_two_leading_dims,
@@ -37,7 +40,7 @@ import gym
 MAX_REPLAY_SIZE = 200_000
 MIN_REPLAY_SIZE = 200
 BATCH_SIZE = 32
-SEQUENCE_LENGTH = 10
+SEQUENCE_LENGTH = 20
 TARGET_UPDATE_PERIOD = 50
 TRAIN_EVERY = 50
 POLICY_LR = 0.005
@@ -46,11 +49,11 @@ MAX_GLOBAL_NORM = 0.5
 EPSILON = 1.0 
 MIN_EPSILON = 0.05 
 EPSILON_DECAY_STEPS = 10_00
-EPSILON_DECAY_RATE = 0.9995
+EPSILON_DECAY_RATE = 0.99995
 POLICY_RECURRENT_LAYER_SIZES = [32]
-POLICY_LAYER_SIZES = [16]
+POLICY_LAYER_SIZES = [32]
 # ENV_NAME = "ma_gym:Switch2-v0"
-ENV_NAME = "CartPole-v0"
+ENV_NAME = "CartPole-v1"
 
 MASTER_PRNGKEY = jax.random.PRNGKey(2022)
 MASTER_PRNGKEY, networks_key, actors_key, buffer_key = jax.random.split(MASTER_PRNGKEY, 4)
@@ -99,7 +102,7 @@ def make_networks(
 
         return hk.DeepRNN(
             [
-            # hk.nets.MLP(policy_layer_sizes, activate_final=True), 
+            hk.nets.MLP(policy_layer_sizes, activate_final=True), 
             hk.GRU(policy_recurrent_layer_sizes[0]), 
             # hk.GRU(policy_recurrent_layer_sizes[1]), 
             # hk.nets.MLP(policy_layer_sizes, activate_final=True), 
@@ -334,11 +337,13 @@ def update_policy(system_state: DQNSystemState, sampled_batch: DQNBufferData, gl
 
 global_step = 0.0
 episode = 0 
-while global_step < 50_000: 
+while global_step < 200_000: 
 
     done = False 
     obs = env.reset()
     episode_return = 0
+    episode_steps = 0 
+    start_time = time.time()
     policy_hidden_state = create_hidden_states()
     while not done: 
 
@@ -365,7 +370,7 @@ while global_step < 50_000:
             reward = add_two_leading_dims(reward), 
             done = add_two_leading_dims(done), 
             next_state = add_two_leading_dims(obs_), 
-            policy_hidden_state = add_two_leading_dims(policy_hidden_state[0])
+            policy_hidden_state = add_two_leading_dims(policy_hidden_state)
         )
 
         obs = obs_ 
@@ -376,6 +381,7 @@ while global_step < 50_000:
         system_state.buffer = buffer_state
 
         episode_return += reward
+        episode_steps += 1
          
         if should_train(system_state.buffer) and (global_step % TRAIN_EVERY == 0): 
 
@@ -385,6 +391,7 @@ while global_step < 50_000:
             system_state = update_policy(system_state, sampled_data, global_step)
 
     
+    sps = episode_steps / (time.time() - start_time)
     episode += 1
     if episode % 1 == 0: 
-        print(f"EPISODE: {episode}, GLOBAL_STEP: {global_step}, EPISODE_RETURN: {episode_return}, EPSILON: {jnp.round(EPSILON, 2)}")   
+        print(f"EPISODE: {episode}, GLOBAL_STEP: {global_step}, EPISODE_RETURN: {episode_return}, EPSILON: {jnp.round(EPSILON, 2)}, SPS: {sps}")   
