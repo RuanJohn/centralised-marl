@@ -71,6 +71,7 @@ if LOG:
 
 # Instantiate the environment & its settings.
 env, env_params = gymnax.make("CartPole-v1")
+eval_env, eval_env_params = gymnax.make("CartPole-v1")
 
 # Reset the environment.
 obs, state = env.reset(env_reset_key, env_params)
@@ -338,7 +339,8 @@ global_step = 0
 rollouts = 0
 episode = 0 
 log_data = {}
-while rollouts < 200: 
+eval_key = jax.random.PRNGKey(100)
+while rollouts < 1000: 
 
     episode_return = 0
     start_time = time.time()
@@ -358,8 +360,8 @@ while rollouts < 200:
     
         
     advantages = rlax.truncated_generalized_advantage_estimation(
-        r_t = jnp.squeeze(system_state.buffer.rewards)[:-1],
-        discount_t = (1 - jnp.squeeze(system_state.buffer.dones))[:-1] * DISCOUNT_GAMMA,
+        r_t = jnp.squeeze(system_state.buffer.rewards)[1:],
+        discount_t = (1 - jnp.squeeze(system_state.buffer.dones))[1:] * DISCOUNT_GAMMA,
         lambda_ = GAE_LAMBDA, 
         values = jnp.squeeze(system_state.buffer.values),
         stop_target_gradients=True
@@ -367,9 +369,8 @@ while rollouts < 200:
 
     advantages = jax.lax.stop_gradient(advantages)
     # Just not sure how to index the values here. 
-    returns = advantages + jnp.squeeze(system_state.buffer.values)[:-1]
+    returns = advantages + jnp.squeeze(system_state.buffer.values)[1:]
     returns = jax.lax.stop_gradient(returns)
-
 
     epoch_scan_out, _ = jax.lax.scan(
         f=epoch_update, 
@@ -383,4 +384,20 @@ while rollouts < 200:
 
     rollouts += 1
     if rollouts % 10 == 0: 
-        print(f"ROLLOUT: {rollouts}, SPS: {int(sps)}")   
+        print(f"ROLLOUT: {rollouts}, SPS: {int(sps)},", end = " ")
+        eval_key, eval_env_reset_key, eval_act_key = jax.random.split(eval_key, 3)
+        eval_obs, eval_state = env.reset(eval_env_reset_key, eval_env_params)
+        done = False
+        returns = 0
+        
+        while not done: 
+            logits = policy_network.apply(system_state.network_params.policy_params, eval_obs)
+            eval_act_key, eval_sample_key, eval_step_key = jax.random.split(eval_act_key, 3)
+            _, action, logprob, entropy = choose_action(logits, eval_sample_key)
+            n_eval_obs, n_eval_state, reward, done, _ = env.step(eval_step_key, eval_state, action, eval_env_params)
+            returns += reward
+
+            eval_obs = n_eval_obs
+            eval_state = n_eval_state
+
+        print(f"EVAL RETURNS: {returns}")
