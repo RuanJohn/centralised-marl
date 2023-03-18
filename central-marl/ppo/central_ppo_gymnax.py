@@ -10,6 +10,7 @@ import distrax
 import rlax
 import chex
 import time
+import gymnax
 
 from utils.types import (
     BufferData, 
@@ -17,21 +18,6 @@ from utils.types import (
     PPOSystemState, 
     NetworkParams,
     OptimiserStates, 
-)
-
-from utils.replay_buffer import (
-    create_buffer, 
-    add, 
-    reset_buffer,
-    should_train,
-)
-
-# add = jax.jit(chex.assert_max_traces(add, n=1))
-# add = jax.jit(chex.assert_max_traces(add, n=1), donate_argnums=(0,))
-add = jax.jit(add)
-
-from utils.array_utils import (
-    add_two_leading_dims,
 )
 
 from utils.loggers import WandbLogger
@@ -57,10 +43,10 @@ NORMALISE_ADVANTAGE = True
 # ENV_NAME = "ma_gym:PredatorPrey5x5-v0"
 ENV_NAME = "LunarLander-v2"
 MASTER_PRNGKEY = jax.random.PRNGKey(2022)
-MASTER_PRNGKEY, networks_key, actors_key, buffer_key = jax.random.split(MASTER_PRNGKEY, 4)
+MASTER_PRNGKEY, networks_key, actors_key, buffer_key, env_create_key, env_reset_key = jax.random.split(MASTER_PRNGKEY, 6)
 
 ALGORITHM = "ff_central_ppo"
-LOG = True
+LOG = False
 
 if LOG: 
     logger = WandbLogger(
@@ -83,13 +69,14 @@ if LOG:
         },  
     )
 
-env = gym.make(ENV_NAME)
+# Instantiate the environment & its settings.
+env, env_params = gymnax.make("CartPole-v1")
 
-# Uncomment for centralised marl envs. 
-# env = CentralControllerWrapper(env)
+# Reset the environment.
+obs, state = env.reset(env_reset_key, env_params)
 
-observation_dim = env.observation_space.shape[0]
-num_actions = env.action_space.n
+observation_dim = env.observation_space(env_params).shape[0]
+num_actions = env.num_actions
 
 # Make networks 
 
@@ -148,24 +135,26 @@ optimiser_states = OptimiserStates(
     critic_state=critic_optimiser_state, 
 )
 
-# Initialise buffer 
-buffer_state = create_buffer(
-    buffer_size=HORIZON, 
-    num_agents=1, 
-    num_envs=1, 
-    observation_dim=observation_dim, 
-)
-
 system_state = PPOSystemState(
-    buffer=buffer_state, 
+    buffer=BufferState(
+        states = None,
+        actions = None,
+        rewards = None,
+        dones = None,
+        log_probs = None,
+        values = None,
+        entropy = None,
+        counter = None,
+        key = None,
+    ), 
     actors_key=actors_key, 
     networks_key=networks_key, 
     network_params=network_params, 
     optimiser_states=optimiser_states, 
 ) 
 
-@jax.jit
-@chex.assert_max_traces(n=1)
+# @jax.jit
+# @chex.assert_max_traces(n=1)
 def choose_action(
     logits,  
     actors_key,
@@ -222,11 +211,11 @@ def critic_loss(
 @chex.assert_max_traces(n=1)
 def update_policy(system_state: PPOSystemState, advantages, mb_idx): 
 
-    states = jnp.squeeze(system_state.buffer.states)[mb_idx]
-    old_log_probs = jnp.squeeze(system_state.buffer.log_probs)[mb_idx]
-    actions = jnp.squeeze(system_state.buffer.actions)[mb_idx]
-    entropies = jnp.squeeze(system_state.buffer.entropy)[mb_idx]
-    advantages = advantages[mb_idx]
+    states = jnp.squeeze(system_state.buffer.states)[jnp.array(mb_idx)]
+    old_log_probs = jnp.squeeze(system_state.buffer.log_probs)[jnp.array(mb_idx)]
+    actions = jnp.squeeze(system_state.buffer.actions)[jnp.array(mb_idx)]
+    entropies = jnp.squeeze(system_state.buffer.entropy)[jnp.array(mb_idx)]
+    advantages = advantages[jnp.array(mb_idx)]
 
     if NORMALISE_ADVANTAGE: 
         advantages = (advantages - jnp.mean(advantages)) / (jnp.std(advantages) + 1e-5)
@@ -259,8 +248,8 @@ def update_critic(
     mb_idx
 ): 
 
-    states = jnp.squeeze(system_state.buffer.states)[mb_idx]
-    returns = returns[mb_idx]
+    states = jnp.squeeze(system_state.buffer.states)[jnp.array(mb_idx)]
+    returns = returns[jnp.array(mb_idx)]
     
     critic_optimiser_state = system_state.optimiser_states.critic_state
     critic_params = system_state.network_params.critic_params
@@ -279,91 +268,119 @@ def update_critic(
 
     return system_state
 
+
+def minibatch_update(carry, mb_idx):
+
+    system_state = carry[0]
+    advantages = carry[1]
+    returns = carry[2]
+
+    system_state = update_policy(system_state, advantages, mb_idx)
+    system_state = update_critic(system_state, returns, mb_idx)
+
+    return (system_state, advantages, returns), mb_idx
+
+def epoch_update(carry, none_in): 
+
+    system_state = carry[0]
+    advantages = carry[1]
+    returns = carry[2]
+
+    networks_key, sample_idx_key = jax.random.split(system_state.networks_key)
+    system_state.networks_key = networks_key
+
+    idxs = jax.random.permutation(key = sample_idx_key, x=HORIZON)
+    mb_idxs = jnp.split(idxs, NUM_MINIBATCHES)
+    
+    # Minibatch update 
+    update_scan_out, _ = jax.lax.scan(
+        f=minibatch_update, 
+        init=(system_state, advantages, returns), 
+        xs=mb_idxs, 
+    )
+    system_state = update_scan_out[0]
+
+    return (system_state, advantages, returns), none_in
+
+def rollout(rng_input, policy_params, critic_params, env_params, steps_in_episode, obs, state):
+    """Rollout a jitted gymnax episode with lax.scan."""
+    # Reset the environment
+    rng_reset, rng_episode = jax.random.split(rng_input)
+
+    def policy_step(state_input, tmp):
+        """lax.scan compatible step transition in jax env."""
+        obs, state, policy_params, critic_params, rng = state_input
+        rng, rng_step, rng_net = jax.random.split(rng, 3)
+        logits = policy_network.apply(policy_params, obs)
+        _, action, logprob, entropy = choose_action(logits, rng_net)
+        value = jnp.squeeze(critic_network.apply(critic_params, obs))
+        next_obs, next_state, reward, done, _ = env.step(
+            rng_step, state, action, env_params
+        )
+        carry = [next_obs, next_state, policy_params, critic_params, rng]
+        return carry, [obs, action, reward, next_obs, done, logprob, entropy, value]
+
+    # Scan over episode step loop
+    carry, scan_out = jax.lax.scan(
+        policy_step,
+        [obs, state, policy_params, critic_params, rng_episode],
+        (),
+        steps_in_episode
+    )
+    # Return masked sum of rewards accumulated by agent in episode
+    obs, action, reward, next_obs, done, logprob, entropy, value = scan_out
+
+    out_obs, out_state, rng = carry[0], carry[1], carry[4]
+    return obs, action, reward, next_obs, done, logprob, entropy, value, out_obs, out_state, rng
+
+
 global_step = 0
+rollouts = 0
 episode = 0 
 log_data = {}
-while global_step < 200_000: 
+while rollouts < 200: 
 
-    done = False 
-    obs = env.reset()
     episode_return = 0
-    episode_steps = 0 
     start_time = time.time()
-    while not done: 
-        
-        logits = policy_network.apply(system_state.network_params.policy_params, obs)
-        
-        actors_key = system_state.actors_key
-        actors_key, action, logprob, entropy = choose_action(logits, actors_key)
-        system_state.actors_key = actors_key
-
-        value = jnp.squeeze(critic_network.apply(system_state.network_params.critic_params, obs))
-        # Covert action to int in order to step the env. 
-        # Can also handle in the wrapper
-        obs_, reward, done, _ = env.step(action.tolist())
-        global_step += 1 # TODO: With vec envs this should be more. 
-        
-        # NB: Correct shapes here. 
-        data = BufferData(
-            state = add_two_leading_dims(obs), 
-            action = add_two_leading_dims(action), 
-            reward = add_two_leading_dims(reward), 
-            done = add_two_leading_dims(done), 
-            log_prob = add_two_leading_dims(logprob), 
-            value = add_two_leading_dims(value), 
-            entropy = add_two_leading_dims(entropy)
-        )
-
-        buffer_state = system_state.buffer 
-        buffer_state = add(buffer_state, data)
-        system_state.buffer = buffer_state
-
-        obs = obs_ 
-        episode_return += reward
-        episode_steps += 1
-        
-        if global_step % (HORIZON + 1) == 0: 
-            
-            advantages = rlax.truncated_generalized_advantage_estimation(
-                r_t = jnp.squeeze(system_state.buffer.rewards)[:-1],
-                discount_t = (1 - jnp.squeeze(system_state.buffer.dones))[:-1] * DISCOUNT_GAMMA,
-                lambda_ = GAE_LAMBDA, 
-                values = jnp.squeeze(system_state.buffer.values),
-                stop_target_gradients=True
-            )
-
-            advantages = jax.lax.stop_gradient(advantages)
-            # Just not sure how to index the values here. 
-            returns = advantages + jnp.squeeze(system_state.buffer.values)[:-1]
-            returns = jax.lax.stop_gradient(returns)
-
-
-            for _ in range(NUM_EPOCHS):
-                
-                # Create data minibatches 
-                # Generate random numbers 
-                networks_key, sample_idx_key = jax.random.split(system_state.networks_key)
-                system_state.actors_key = networks_key
-
-                idxs = jax.random.permutation(key = sample_idx_key, x=HORIZON)
-                mb_idxs = jnp.split(idxs, NUM_MINIBATCHES)
-                
-                for mb_idx in mb_idxs:
-                    system_state = update_policy(system_state, advantages, mb_idx)
-                    system_state = update_critic(system_state, returns, mb_idx)
-            
-            
-            buffer_state = reset_buffer(buffer_state) 
-            system_state.buffer = buffer_state
     
-    sps = episode_steps / (time.time() - start_time)
+    states, actions, rewards, _, dones, logprobs, entropies, values, obs, state, buffer_key = rollout(
+        buffer_key, system_state.network_params.policy_params, system_state.network_params.critic_params, 
+        env_params, HORIZON+1, obs, state, 
+    )
+    
+    system_state.buffer.states = states
+    system_state.buffer.actions = actions
+    system_state.buffer.rewards = rewards
+    system_state.buffer.dones = dones
+    system_state.buffer.log_probs = logprobs
+    system_state.buffer.entropy = entropies
+    system_state.buffer.values = values
+    
+        
+    advantages = rlax.truncated_generalized_advantage_estimation(
+        r_t = jnp.squeeze(system_state.buffer.rewards)[:-1],
+        discount_t = (1 - jnp.squeeze(system_state.buffer.dones))[:-1] * DISCOUNT_GAMMA,
+        lambda_ = GAE_LAMBDA, 
+        values = jnp.squeeze(system_state.buffer.values),
+        stop_target_gradients=True
+    )
 
-    if LOG: 
-        log_data["episode"] = episode
-        log_data["episode_return"] = episode_return
-        log_data["global_step"] = global_step
-        logger.write(logging_details=log_data)
+    advantages = jax.lax.stop_gradient(advantages)
+    # Just not sure how to index the values here. 
+    returns = advantages + jnp.squeeze(system_state.buffer.values)[:-1]
+    returns = jax.lax.stop_gradient(returns)
 
-    episode += 1
-    if episode % 10 == 0: 
-        print(f"EPISODE: {episode}, GLOBAL_STEP: {global_step}, EPISODE_RETURN: {episode_return}, SPS: {int(sps)}")   
+
+    epoch_scan_out, _ = jax.lax.scan(
+        f=epoch_update, 
+        init=(system_state, advantages, returns),
+        xs=None,  
+        length=NUM_EPOCHS, 
+    )
+    system_state = epoch_scan_out[0]
+    
+    sps = (HORIZON + 1) / (time.time() - start_time)
+
+    rollouts += 1
+    if rollouts % 10 == 0: 
+        print(f"ROLLOUT: {rollouts}, SPS: {int(sps)}")   
