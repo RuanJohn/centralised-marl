@@ -26,15 +26,17 @@ from utils.array_utils import (
     add_two_leading_dims,
 )
 
+add = jax.jit(add)
+
 from wrappers.ma_gym_wrapper import CentralControllerWrapper
 
 import gym
 
 # Constants: 
 MAX_REPLAY_SIZE = 200_000
-MIN_REPLAY_SIZE = 1_000
-BATCH_SIZE = 128
-TARGET_UPDATE_PERIOD = 500
+MIN_REPLAY_SIZE = 1_000 # 1000
+BATCH_SIZE = 128 # 128
+TARGET_UPDATE_PERIOD = 200
 TRAIN_EVERY = 20
 POLICY_LR = 0.005
 DISCOUNT_GAMMA = 0.99 
@@ -113,14 +115,8 @@ system_state = DQNSystemState(
     networks_key=networks_key, 
     network_params=network_params, 
     optimiser_states=optimiser_states, 
+    training_iterations=jnp.int32(TARGET_UPDATE_PERIOD), 
 ) 
-
-# TODO: Cannot select like this when jitting. 
-def random_action(): 
-
-    action = env.action_space.sample()
-
-    return action
 
 # NB must sample randomly like this. 
 def select_random_action(key, num_actions): 
@@ -161,8 +157,6 @@ def choose_action(
 
     return actors_key, action
 
-# @jax.jit
-# @chex.assert_max_traces(n=1)
 def dqn_loss(
     policy_params, 
     states, 
@@ -172,21 +166,28 @@ def dqn_loss(
     next_states, 
     target_policy_params, ):
 
-    q_values = jax.vmap(policy_network.apply, in_axes=(None, 0))(policy_params, states)
-    target_q_values = jax.vmap(policy_network.apply, in_axes=(None, 0))(target_policy_params, next_states)
-    
-    # TODO: infer num classes from q_values
-    selected_q_values = jnp.sum(
-        jax.nn.one_hot(actions, num_classes = num_actions) * q_values, 
-        axis=-1, 
-        keepdims=True)
-    selected_q_values = jnp.squeeze(selected_q_values)
+    q_out = jnp.empty_like(rewards)
+    q_next_out = jnp.empty_like(rewards)
 
-    
-    selected_target_q_values = jnp.max(target_q_values, axis=-1)
-    bellman_target = rewards + DISCOUNT_GAMMA * (1 - dones) * selected_target_q_values
+    for agent_idx in range(num_agents):
+        q_values = jax.vmap(policy_network.apply, in_axes=(None, 0))(policy_params, states[:, agent_idx, :])
+        target_q_values = jax.vmap(policy_network.apply, in_axes=(None, 0))(target_policy_params, next_states[:, agent_idx, :])
+        
+        # TODO: infer num classes from q_values
+        selected_q_values = jnp.sum(
+            jax.nn.one_hot(actions[:, agent_idx], num_classes = num_actions) * q_values, 
+            axis=-1, 
+            keepdims=True)
+        selected_q_values = jnp.squeeze(selected_q_values)
+        
+        selected_target_q_values = jnp.max(target_q_values, axis=-1)
+
+        q_out = q_out.at[:, agent_idx].set(selected_q_values)
+        q_next_out = q_next_out.at[:, agent_idx].set(selected_target_q_values)
+
+    bellman_target = rewards + DISCOUNT_GAMMA * (1 - dones) * q_next_out
     bellman_target = jax.lax.stop_gradient(bellman_target)
-    td_error = (bellman_target - selected_q_values) 
+    td_error = (bellman_target - q_out) 
 
     # Can also just use rlax here. 
 
@@ -206,24 +207,22 @@ def dqn_loss(
 @chex.assert_max_traces(n=1)
 def update_policy(
     system_state: DQNSystemState, 
-    sampled_batch: DQNBufferData, 
-    global_step: int, 
-    agent_idx: int): 
+    sampled_batch: DQNBufferData, ): 
 
-    states = jnp.squeeze(sampled_batch.state[:,:,agent_idx,:])
-    actions = jnp.squeeze(sampled_batch.action[:,:,agent_idx,:])
-    rewards = jnp.squeeze(sampled_batch.reward[:,:,agent_idx])
-    dones = jnp.squeeze(sampled_batch.done[:,:,agent_idx])
-    next_states = jnp.squeeze(sampled_batch.next_state[:,:,agent_idx,:])
     
+    states = jnp.squeeze(sampled_batch.state[:,:,:,:])
+    actions = jnp.squeeze(sampled_batch.action[:,:,:,:])
+    rewards = jnp.squeeze(sampled_batch.reward[:,:,:])
+    dones = jnp.squeeze(sampled_batch.done[:,:,:])
+    next_states = jnp.squeeze(sampled_batch.next_state[:,:,:,:])
+
     policy_optimiser_state = system_state.optimiser_states.policy_state
     policy_params = system_state.network_params.policy_params
     target_policy_params = system_state.network_params.target_policy_params
 
-    # NB here. TARGET_UPDATE_PERIOD must be divisble by TRAIN_EVERY. 
     target_policy_params = optax.periodic_update(
-            policy_params, target_policy_params, global_step, TARGET_UPDATE_PERIOD
-        )
+        policy_params, target_policy_params, system_state.training_iterations, TARGET_UPDATE_PERIOD
+    )
     
     grads = jax.grad(dqn_loss)(
         policy_params, 
@@ -241,6 +240,8 @@ def update_policy(
     system_state.optimiser_states.policy_state = new_policy_optimiser_state
     system_state.network_params.policy_params = new_policy_params
     system_state.network_params.target_policy_params = target_policy_params
+    
+    system_state.training_iterations += 1
 
     return system_state
 
@@ -298,11 +299,10 @@ while global_step < 500_000:
         
         if can_sample(system_state.buffer) and (global_step % TRAIN_EVERY == 0): 
             
-            for agent in range(num_agents): 
-                buffer_state = system_state.buffer
-                buffer_state, sampled_data = sample_batch(buffer_state)
-                system_state.buffer = buffer_state
-                system_state = update_policy(system_state, sampled_data, global_step, agent)
+            buffer_state = system_state.buffer
+            buffer_state, sampled_data = sample_batch(buffer_state)
+            system_state.buffer = buffer_state
+            system_state = update_policy(system_state, sampled_data)
 
     
     episode += 1
