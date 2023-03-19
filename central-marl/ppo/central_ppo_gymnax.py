@@ -41,7 +41,7 @@ POLICY_LAYER_SIZES = [64, 64]
 CRITIC_LAYER_SIZES = [64, 64]
 NORMALISE_ADVANTAGE = True
 # ENV_NAME = "ma_gym:PredatorPrey5x5-v0"
-ENV_NAME = "LunarLander-v2"
+ENV_NAME = "CartPole-v1"
 MASTER_PRNGKEY = jax.random.PRNGKey(2022)
 MASTER_PRNGKEY, networks_key, actors_key, buffer_key, env_create_key, env_reset_key = jax.random.split(MASTER_PRNGKEY, 6)
 
@@ -70,8 +70,8 @@ if LOG:
     )
 
 # Instantiate the environment & its settings.
-env, env_params = gymnax.make("CartPole-v1")
-eval_env, eval_env_params = gymnax.make("CartPole-v1")
+env, env_params = gymnax.make(ENV_NAME)
+eval_env, eval_env_params = gymnax.make(ENV_NAME)
 
 # Reset the environment.
 obs, state = env.reset(env_reset_key, env_params)
