@@ -48,7 +48,7 @@ EPSILON_DECAY_STEPS = 10_000
 EPSILON_DECAY_RATE = 0.9999
 POLICY_LAYER_SIZES = [32]
 POLICY_RECURRENT_LAYER_SIZES = [64]
-ENV_NAME = "ma_gym:Switch2-v0"
+ENV_NAME = "ma_gym:Checkers-v0"
 
 MASTER_PRNGKEY = jax.random.PRNGKey(2022)
 MASTER_PRNGKEY, networks_key, actors_key, buffer_key = jax.random.split(MASTER_PRNGKEY, 4)
@@ -190,6 +190,14 @@ def select_q_values(q_value, action, target_q_value):
     
     return q_value[action], jnp.max(target_q_value)
 
+def select_double_q_values(q_value, action, target_q_value, selector_q_value): 
+
+    chex.assert_rank([q_value, action, target_q_value, selector_q_value], [1, 0, 1, 1])
+    chex.assert_type([q_value, action, target_q_value],
+                    [float, int, float])
+    
+    return q_value[action], target_q_value[jnp.argmax(selector_q_value)]
+
 def dqn_loss(
     policy_params, 
     states, 
@@ -246,8 +254,12 @@ def dqn_loss(
         selector_q_out = selector_q_out.at[:, :, agent_idx].set(selector_q_values)
 
     # Can also just use rlax here. 
-    batched_select_q_values = jax.vmap(jax.vmap(jax.vmap(select_q_values)))
-    q_out, q_next_out = batched_select_q_values(q_out, actions, q_next_out)
+    # batched_select_q_values = jax.vmap(jax.vmap(jax.vmap(select_q_values)))
+    # q_out, q_next_out = batched_select_q_values(q_out, actions, q_next_out)
+
+    batched_select_q_values = jax.vmap(jax.vmap(jax.vmap(select_double_q_values)))
+    q_out, q_next_out = batched_select_q_values(q_out, actions, q_next_out, selector_q_out)
+
 
     # Doing VDN mixing here. 
     q_out = jnp.sum(q_out, axis=-1)
