@@ -34,8 +34,8 @@ import gym
 
 # Constants: 
 MAX_REPLAY_SIZE = 500_0
-MIN_REPLAY_SIZE = 200 # 1000
-BATCH_SIZE = 128 # 128
+MIN_REPLAY_SIZE = 100 # 1000
+BATCH_SIZE = 64
 SEQUENCE_LENGTH = 20
 TARGET_UPDATE_PERIOD = 100
 TRAIN_EVERY = 50
@@ -182,11 +182,13 @@ def choose_action(
 
     return actors_key, action
 
-def select_q_values(q_values, target_q_values, action): 
+def select_q_values(q_value, action, target_q_value): 
 
-    chex.assert_rank([q_values, action, target_q_values], [1, 0, 1])
-    chex.assert_type([q_values, action, target_q_values],
+    chex.assert_rank([q_value, action, target_q_value], [1, 0, 1])
+    chex.assert_type([q_value, action, target_q_value],
                     [float, int, float])
+    
+    return q_value[action], jnp.max(target_q_value)
 
 def dqn_loss(
     policy_params, 
@@ -244,17 +246,25 @@ def dqn_loss(
         selector_q_out = selector_q_out.at[:, :, agent_idx].set(selector_q_values)
 
     # Can also just use rlax here. 
-    # q_out = jnp.sum(q_out, axis=
+    batched_select_q_values = jax.vmap(jax.vmap(jax.vmap(select_q_values)))
+    q_out, q_next_out = batched_select_q_values(q_out, actions, q_next_out)
 
-    batched_loss = jax.vmap(jax.vmap(jax.vmap(rlax.q_learning)))
+    # Doing VDN mixing here. 
+    q_out = jnp.sum(q_out, axis=-1)
+    rewards = jnp.sum(rewards, axis=-1)
+    q_next_out = jnp.sum(q_next_out, axis=-1)
+    # dones = jnp.all(dones, axis=-1)
 
-    td_error = batched_loss(
-        q_tm1=q_out, 
-        a_tm1=actions, 
-        r_t=rewards, 
-        discount_t=(1 - dones) * DISCOUNT_GAMMA,
-        q_t=q_next_out,
-    )
+    # TODO: fix this. 
+    # Just selecting the first agent's done and masks. 
+    # There is definitely a better way to do this. 
+    dones = dones[:, :, 0]
+    masks = masks[:, :, 0]
+
+    target = rewards + (1 - dones) * q_next_out * DISCOUNT_GAMMA
+    target = jax.lax.stop_gradient(target)
+
+    td_error = (q_out - target) ** 2
 
     # Mask the td error 
     td_error = td_error * masks 
