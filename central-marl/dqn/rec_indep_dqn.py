@@ -1,6 +1,7 @@
 """Independent multi-agent JAX DQN."""
 
 import jax.numpy as jnp 
+import numpy as np 
 import jax 
 import haiku as hk
 import optax
@@ -33,9 +34,9 @@ from wrappers.ma_gym_wrapper import CentralControllerWrapper
 import gym
 
 # Constants: 
-MAX_REPLAY_SIZE = 500_0
-MIN_REPLAY_SIZE = 200 # 1000
-BATCH_SIZE = 128 # 128
+MAX_REPLAY_SIZE = 500_00
+MIN_REPLAY_SIZE = 100 # 1000
+BATCH_SIZE = 64 # 128
 SEQUENCE_LENGTH = 20
 TARGET_UPDATE_PERIOD = 100
 TRAIN_EVERY = 50
@@ -45,7 +46,7 @@ MAX_GLOBAL_NORM = 0.5
 EPSILON = 1.0 
 MIN_EPSILON = 0.05 
 EPSILON_DECAY_STEPS = 10_000
-EPSILON_DECAY_RATE = 0.9999
+EPSILON_DECAY_RATE = 0.99995
 POLICY_LAYER_SIZES = [32]
 POLICY_RECURRENT_LAYER_SIZES = [64]
 ENV_NAME = "ma_gym:Switch2-v0"
@@ -239,14 +240,25 @@ def dqn_loss(
 
     # Can also just use rlax here. 
 
-    batched_loss = jax.vmap(jax.vmap(jax.vmap(rlax.q_learning)))
+    # batched_loss = jax.vmap(jax.vmap(jax.vmap(rlax.q_learning)))
+
+    # td_error = batched_loss(
+    #     q_tm1=q_out, 
+    #     a_tm1=actions, 
+    #     r_t=rewards, 
+    #     discount_t=(1 - dones) * DISCOUNT_GAMMA,
+    #     q_t=q_next_out,
+    # )
+
+    batched_loss = jax.vmap(jax.vmap(jax.vmap(rlax.double_q_learning)))
 
     td_error = batched_loss(
         q_tm1=q_out, 
         a_tm1=actions, 
         r_t=rewards, 
         discount_t=(1 - dones) * DISCOUNT_GAMMA,
-        q_t=q_next_out,
+        q_t_value=q_next_out,
+        q_t_selector=selector_q_out, 
     )
 
     # Mask the td error 
@@ -303,12 +315,16 @@ def update_policy(
 
 global_step = 0
 episode = 0 
+episode_returns = []
 while global_step < 500_000: 
 
     team_done = False 
     obs = env.reset()
     episode_return = 0
     policy_hidden_state = create_hidden_states()
+    # Each agent has its own hidden state. 
+    policy_hidden_state = jnp.broadcast_to(policy_hidden_state, (num_agents, *policy_hidden_state.shape))
+    new_policy_hidden_state = jnp.empty_like(policy_hidden_state)
     while not team_done: 
 
         if should_train(system_state.buffer): 
@@ -321,12 +337,12 @@ while global_step < 500_000:
         act_joint_action = jnp.empty((num_agents,1), dtype=jnp.int32) 
 
         for agent in range(num_agents):
-            q_values, new_policy_hidden_state = policy_network.apply(
+            q_values, new_policy_hidden_state_ = policy_network.apply(
                 system_state.network_params.policy_params, 
                 jnp.array(obs[agent], dtype=jnp.float32), 
-                policy_hidden_state)
+                policy_hidden_state[agent])
 
-            new_policy_hidden_state = jnp.expand_dims(new_policy_hidden_state[0], axis=0)
+            new_policy_hidden_state_ = jnp.expand_dims(new_policy_hidden_state_[0], axis=0)
             actors_key = system_state.actors_key
             actors_key, action = choose_action(actors_key, q_values, EPSILON)
             system_state.actors_key = actors_key
@@ -334,6 +350,8 @@ while global_step < 500_000:
             step_joint_action = step_joint_action.at[agent].set(action)
 
             act_joint_action = act_joint_action.at[agent, 0].set(action)
+            new_policy_hidden_state = new_policy_hidden_state.at[agent].set(new_policy_hidden_state_)
+
 
         # Covert action to int in order to step the env. 
         # Can also handle in the wrapper
@@ -348,7 +366,7 @@ while global_step < 500_000:
             reward = jnp.expand_dims(jnp.array(reward, dtype=jnp.float32), axis=0), 
             done = jnp.expand_dims(jnp.array(done, dtype=bool), axis=0), 
             next_state = jnp.expand_dims(jnp.array(obs_, dtype=jnp.float32), axis=0), 
-            policy_hidden_state = jnp.expand_dims(jnp.broadcast_to(policy_hidden_state, (num_agents, *policy_hidden_state.shape)), axis=0)
+            policy_hidden_state = jnp.expand_dims(policy_hidden_state, axis=0)
         )
 
         obs = obs_ 
@@ -369,5 +387,7 @@ while global_step < 500_000:
 
     
     episode += 1
+    episode_returns.append(episode_return)
+    rolling_return = np.mean(episode_returns[-100:])
     if episode % 1 == 0: 
-        print(f"EPISODE: {episode}, GLOBAL_STEP: {global_step}, EPISODE_RETURN: {episode_return}, EPSILON: {jnp.round(EPSILON, 2)}")   
+        print(f"EPISODE: {episode}, GLOBAL_STEP: {global_step}, EPISODE_RETURN: {episode_return:.2f}, EPSILON: {EPSILON:.2f}, ROLLING_RETURN: {rolling_return:.2f}")   

@@ -33,7 +33,7 @@ from wrappers.ma_gym_wrapper import CentralControllerWrapper
 import gym
 
 # Constants: 
-MAX_REPLAY_SIZE = 500_0
+MAX_REPLAY_SIZE = 500_00
 MIN_REPLAY_SIZE = 100 # 1000
 BATCH_SIZE = 64
 SEQUENCE_LENGTH = 20
@@ -45,7 +45,7 @@ MAX_GLOBAL_NORM = 0.5
 EPSILON = 1.0 
 MIN_EPSILON = 0.05 
 EPSILON_DECAY_STEPS = 10_000
-EPSILON_DECAY_RATE = 0.9999
+EPSILON_DECAY_RATE = 0.99995
 POLICY_LAYER_SIZES = [32]
 POLICY_RECURRENT_LAYER_SIZES = [64]
 ENV_NAME = "ma_gym:Checkers-v0"
@@ -338,6 +338,9 @@ while global_step < 500_000:
     obs = env.reset()
     episode_return = 0
     policy_hidden_state = create_hidden_states()
+    # Each agent has its own hidden state. 
+    policy_hidden_state = jnp.broadcast_to(policy_hidden_state, (num_agents, *policy_hidden_state.shape))
+    new_policy_hidden_state = jnp.empty_like(policy_hidden_state)
     while not team_done: 
 
         if should_train(system_state.buffer): 
@@ -350,12 +353,12 @@ while global_step < 500_000:
         act_joint_action = jnp.empty((num_agents,1), dtype=jnp.int32) 
 
         for agent in range(num_agents):
-            q_values, new_policy_hidden_state = policy_network.apply(
+            q_values, new_policy_hidden_state_ = policy_network.apply(
                 system_state.network_params.policy_params, 
                 jnp.array(obs[agent], dtype=jnp.float32), 
-                policy_hidden_state)
+                policy_hidden_state[agent])
 
-            new_policy_hidden_state = jnp.expand_dims(new_policy_hidden_state[0], axis=0)
+            new_policy_hidden_state_ = jnp.expand_dims(new_policy_hidden_state_[0], axis=0)
             actors_key = system_state.actors_key
             actors_key, action = choose_action(actors_key, q_values, EPSILON)
             system_state.actors_key = actors_key
@@ -363,6 +366,7 @@ while global_step < 500_000:
             step_joint_action = step_joint_action.at[agent].set(action)
 
             act_joint_action = act_joint_action.at[agent, 0].set(action)
+            new_policy_hidden_state = new_policy_hidden_state.at[agent].set(new_policy_hidden_state_)
 
         # Covert action to int in order to step the env. 
         # Can also handle in the wrapper
@@ -377,7 +381,7 @@ while global_step < 500_000:
             reward = jnp.expand_dims(jnp.array(reward, dtype=jnp.float32), axis=0), 
             done = jnp.expand_dims(jnp.array(done, dtype=bool), axis=0), 
             next_state = jnp.expand_dims(jnp.array(obs_, dtype=jnp.float32), axis=0), 
-            policy_hidden_state = jnp.expand_dims(jnp.broadcast_to(policy_hidden_state, (num_agents, *policy_hidden_state.shape)), axis=0)
+            policy_hidden_state = jnp.expand_dims(policy_hidden_state, axis=0)
         )
 
         obs = obs_ 
