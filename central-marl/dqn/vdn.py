@@ -182,6 +182,12 @@ def choose_action(
 
     return actors_key, action
 
+def select_q_values(q_values, target_q_values, action): 
+
+    chex.assert_rank([q_values, action, target_q_values], [1, 0, 1])
+    chex.assert_type([q_values, action, target_q_values],
+                    [float, int, float])
+
 def dqn_loss(
     policy_params, 
     states, 
@@ -238,6 +244,7 @@ def dqn_loss(
         selector_q_out = selector_q_out.at[:, :, agent_idx].set(selector_q_values)
 
     # Can also just use rlax here. 
+    # q_out = jnp.sum(q_out, axis=
 
     batched_loss = jax.vmap(jax.vmap(jax.vmap(rlax.q_learning)))
 
