@@ -11,7 +11,8 @@ def create_buffer(
     observation_dim: int, 
     # TODO: Handle multiple hidden states. 
     # For now only one. 
-    hidden_state_dim: int, 
+    policy_hidden_state_dim: tuple, 
+    critic_hidden_state_dim: tuple, 
     action_dim: int = 1, 
     buffer_key: chex.PRNGKey = random.PRNGKey(0),
 ) -> BufferState: 
@@ -39,8 +40,8 @@ def create_buffer(
         log_probs = jnp.empty((buffer_size + 1, num_envs, num_agents), dtype=jnp.float32), 
         values = jnp.empty((buffer_size + 1, num_envs, num_agents), dtype=jnp.float32), 
         entropy = jnp.empty((buffer_size + 1, num_envs, num_agents), dtype=jnp.float32),
-        policy_hidden_states = jnp.empty((buffer_size + 1, num_envs, num_agents, 1, hidden_state_dim), dtype=jnp.float32), 
-        critic_hidden_states = jnp.empty((buffer_size + 1, num_envs, num_agents, 1, hidden_state_dim), dtype=jnp.float32), 
+        policy_hidden_states = jnp.empty((buffer_size + 1, num_envs, num_agents, *policy_hidden_state_dim), dtype=jnp.float32), 
+        critic_hidden_states = jnp.empty((buffer_size + 1, num_envs, num_agents, *critic_hidden_state_dim), dtype=jnp.float32), 
         counter = jnp.int32(0), 
         key = buffer_key, 
 

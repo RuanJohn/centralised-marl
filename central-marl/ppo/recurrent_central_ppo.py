@@ -205,7 +205,8 @@ buffer_state = create_buffer(
     num_envs=1, 
     observation_dim=observation_dim, 
     # NOTE: Need to pay attention here. 
-    hidden_state_dim=policy_hidden_state.shape[1]
+    policy_hidden_state_dim=policy_hidden_state.shape, 
+    critic_hidden_state_dim=critic_hidden_state.shape, 
 )
 
 system_state = PPOSystemState(
