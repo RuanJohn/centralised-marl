@@ -29,7 +29,7 @@ from wrappers.agent_id_wrapper import AgentIDWrapper
 
 import gym
 
-jit_add = jax.jit(add)
+jit_add = jax.jit(add, donate_argnums=(0))
 
 # Constants: 
 HORIZON = 200 
@@ -39,14 +39,14 @@ POLICY_LR = 0.005
 CRITIC_LR = 0.005
 DISCOUNT_GAMMA = 0.99 
 GAE_LAMBDA = 0.95
-NUM_EPOCHS = 3
-NUM_MINIBATCHES = 2 
+NUM_EPOCHS = 1
+NUM_MINIBATCHES = 4 
 MAX_GLOBAL_NORM = 0.5
 ADAM_EPS = 1e-5
-POLICY_LAYER_SIZES = [32]
-CRITIC_LAYER_SIZES = [32]
-POLICY_RECURRENT_LAYER_SIZES = [32]
-CRITIC_RECURRENT_LAYER_SIZES = [32]
+POLICY_LAYER_SIZES = [64]
+CRITIC_LAYER_SIZES = [64]
+POLICY_RECURRENT_LAYER_SIZES = [64]
+CRITIC_RECURRENT_LAYER_SIZES = [64]
 
 # TODO: Add agent IDS. 
 ADD_ONE_HOT_IDS = False
@@ -209,8 +209,8 @@ system_state = PPOSystemState(
     optimiser_states=optimiser_states, 
 ) 
 
-# @jax.jit
-# @chex.assert_max_traces(n=1)
+@jax.jit
+@chex.assert_max_traces(n=1)
 def choose_action(
     logits,  
     actors_key,
@@ -236,21 +236,27 @@ def policy_loss(
     entropies_,
     policy_hidden_states_):
 
+    new_log_probs = jnp.empty_like(old_log_probs)
+
     def policy_core(input: jnp.ndarray, hidden_state: jnp.ndarray) -> jnp.ndarray:
         
         return policy_network.apply(policy_params, input, hidden_state)
 
     policy_hidden_states_ = policy_hidden_states_[:, 0, :, :]
 
-    logits, _ = hk.static_unroll(
-        policy_core, 
-        states, 
-        policy_hidden_states_, 
-        time_major=False, 
-    )
-    dist = distrax.Categorical(logits=logits)
+    for agent in range(num_agents):
 
-    new_log_probs = dist.log_prob(value=actions)
+        logits, _ = hk.static_unroll(
+            policy_core, 
+            states[:,:,agent,:], 
+            policy_hidden_states_[:, agent, :, :], 
+            time_major=False, 
+        )
+        dist = distrax.Categorical(logits=logits)
+
+        new_log_probs_ = dist.log_prob(value=actions[:, :, agent])
+        new_log_probs = new_log_probs.at[:, :, agent].set(new_log_probs_)
+
 
     logratio = new_log_probs - old_log_probs
     ratio = jnp.exp(logratio)
@@ -274,20 +280,24 @@ def critic_loss(
     critic_hidden_states_,
     ):
 
+    new_values = jnp.empty_like(returns)
+
     def critic_core(input: jnp.ndarray, hidden_state: jnp.ndarray) -> jnp.ndarray:
         
         return critic_network.apply(critic_params, input, hidden_state)
 
     critic_hidden_states_ = critic_hidden_states_[:, 0, :, :]
     
-    new_values, _ = hk.static_unroll(
-        critic_core, 
-        states, 
-        critic_hidden_states_, 
-        time_major=False, 
-    )
-    
-    new_values = jnp.squeeze(new_values)
+    for agent in range(num_agents): 
+        new_values_, _ = hk.static_unroll(
+            critic_core, 
+            states[:,:,agent,:], 
+            critic_hidden_states_[:, agent, :, :], 
+            time_major=False, 
+        )
+        
+        new_values_ = jnp.squeeze(new_values_)
+        new_values = new_values.at[:, :, agent].set(new_values_)
     
     loss = 0.5 * ((new_values - returns) ** 2).mean()
     # jax.debug.print("critic loss {x}", x= loss)
@@ -297,35 +307,34 @@ def critic_loss(
 @chex.assert_max_traces(n=1)
 def update_policy(system_state: PPOSystemState, advantages, mb_idx): 
 
-    for agent in range(num_agents): 
-        states_ = jnp.squeeze(system_state.train_buffer.states[:, :, :, agent, :])[mb_idx]
-        old_log_probs_ = jnp.squeeze(system_state.train_buffer.log_probs[:, :, :, agent])[mb_idx]
-        actions_ = jnp.squeeze(system_state.train_buffer.actions[:, :, :, agent, :])[mb_idx]
-        entropies_ = jnp.squeeze(system_state.train_buffer.entropy[:, :, :, agent])[mb_idx]
-        policy_hidden_states_ = jnp.squeeze(system_state.train_buffer.policy_hidden_states[:, :, :, agent, :, :], axis=2)[mb_idx]
-        advantages_ = advantages[:, :, agent][mb_idx]
+    states_ = jnp.squeeze(system_state.train_buffer.states)[mb_idx]
+    old_log_probs_ = jnp.squeeze(system_state.train_buffer.log_probs)[mb_idx]
+    actions_ = jnp.squeeze(system_state.train_buffer.actions)[mb_idx]
+    entropies_ = jnp.squeeze(system_state.train_buffer.entropy)[mb_idx]
+    policy_hidden_states_ = jnp.squeeze(system_state.train_buffer.policy_hidden_states, axis=2)[mb_idx]
+    advantages_ = advantages[mb_idx]
 
-        if NORMALISE_ADVANTAGE: 
-            advantages_ = (advantages_ - jnp.mean(advantages_)) / (jnp.std(advantages_) + 1e-5)
-        
-        policy_optimiser_state = system_state.optimiser_states.policy_state
-        policy_params = system_state.network_params.policy_params
+    if NORMALISE_ADVANTAGE: 
+        advantages_ = (advantages_ - jnp.mean(advantages_)) / (jnp.std(advantages_) + 1e-5)
+    
+    policy_optimiser_state = system_state.optimiser_states.policy_state
+    policy_params = system_state.network_params.policy_params
 
-        grads = jax.grad(policy_loss)(
-            policy_params, 
-            states_, 
-            actions_, 
-            old_log_probs_, 
-            advantages_,
-            entropies_,
-            policy_hidden_states_, 
-        )
+    grads = jax.grad(policy_loss)(
+        policy_params, 
+        states_, 
+        actions_, 
+        old_log_probs_, 
+        advantages_,
+        entropies_,
+        policy_hidden_states_, 
+    )
 
-        updates, new_policy_optimiser_state = policy_optimiser.update(grads, policy_optimiser_state)
-        new_policy_params = optax.apply_updates(policy_params, updates)
+    updates, new_policy_optimiser_state = policy_optimiser.update(grads, policy_optimiser_state)
+    new_policy_params = optax.apply_updates(policy_params, updates)
 
-        system_state.optimiser_states.policy_state = new_policy_optimiser_state
-        system_state.network_params.policy_params = new_policy_params
+    system_state.optimiser_states.policy_state = new_policy_optimiser_state
+    system_state.network_params.policy_params = new_policy_params
 
     return system_state
 
@@ -337,26 +346,25 @@ def update_critic(
     mb_idx,
 ): 
 
-    for agent in range(num_agents): 
-        states_ = jnp.squeeze(system_state.train_buffer.states[:, :, :, agent, :])[mb_idx]
-        critic_hidden_states_ = jnp.squeeze(system_state.train_buffer.critic_hidden_states[:, :, :, agent, :, :], axis=2)[mb_idx]
-        returns_ = returns[:, :, agent][mb_idx]
-        
-        critic_optimiser_state = system_state.optimiser_states.critic_state
-        critic_params = system_state.network_params.critic_params
+    states_ = jnp.squeeze(system_state.train_buffer.states)[mb_idx]
+    critic_hidden_states_ = jnp.squeeze(system_state.train_buffer.critic_hidden_states, axis=2)[mb_idx]
+    returns_ = returns[mb_idx]
+    
+    critic_optimiser_state = system_state.optimiser_states.critic_state
+    critic_params = system_state.network_params.critic_params
 
-        grads = jax.grad(critic_loss)(
-            critic_params, 
-            states_, 
-            returns_,
-            critic_hidden_states_,
-        )
+    grads = jax.grad(critic_loss)(
+        critic_params, 
+        states_, 
+        returns_,
+        critic_hidden_states_,
+    )
 
-        updates, new_critic_optimiser_state = critic_optimiser.update(grads, critic_optimiser_state)
-        new_critic_params = optax.apply_updates(critic_params, updates)
+    updates, new_critic_optimiser_state = critic_optimiser.update(grads, critic_optimiser_state)
+    new_critic_params = optax.apply_updates(critic_params, updates)
 
-        system_state.optimiser_states.critic_state = new_critic_optimiser_state
-        system_state.network_params.critic_params = new_critic_params
+    system_state.optimiser_states.critic_state = new_critic_optimiser_state
+    system_state.network_params.critic_params = new_critic_params
 
     return system_state
 
