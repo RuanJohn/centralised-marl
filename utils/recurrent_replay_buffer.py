@@ -15,6 +15,7 @@ def create_buffer(
     critic_hidden_state_dim: tuple, 
     action_dim: int = 1, 
     buffer_key: chex.PRNGKey = random.PRNGKey(0),
+    joint_observation_dim: int = None, 
 ) -> BufferState: 
 
     """A simple trajectory buffer. 
@@ -44,8 +45,10 @@ def create_buffer(
         critic_hidden_states = jnp.empty((buffer_size + 1, num_envs, num_agents, *critic_hidden_state_dim), dtype=jnp.float32), 
         counter = jnp.int32(0), 
         key = buffer_key, 
-
     ) 
+
+    if joint_observation_dim is not None: 
+        buffer_state.joint_observations = jnp.empty((buffer_size + 1, num_envs, num_agents, joint_observation_dim), dtype=jnp.float32), 
 
     return buffer_state
 
@@ -63,6 +66,9 @@ def add(
     buffer_state.entropy = buffer_state.entropy.at[buffer_state.counter].set(data.entropy)
     buffer_state.policy_hidden_states = buffer_state.policy_hidden_states.at[buffer_state.counter].set(data.policy_hidden_state)
     buffer_state.critic_hidden_states = buffer_state.critic_hidden_states.at[buffer_state.counter].set(data.critic_hidden_state)
+
+    if data.joint_observation is not None: 
+        buffer_state.joint_observations = buffer_state.joint_observations.at[buffer_state.counter].set(data.joint_observation)
 
     buffer_state.counter += 1
 
@@ -85,6 +91,10 @@ def reset_buffer(buffer_state) -> BufferState:
         counter = jnp.int32(0), 
         key = current_buffer_state.key, 
     )
+
+    if buffer_state.joint_observations is not None: 
+        buffer_state.joint_observations = jnp.empty_like(current_buffer_state.joint_observations)
+
 
     return new_buffer_state
 
@@ -132,5 +142,10 @@ def split_buffer_into_chunks(
         counter = current_buffer_state.counter, 
         key = current_buffer_state.key, 
     )
+
+    if buffer_state.joint_observations is not None: 
+        split_buffer_state.joint_observations = jnp.array(
+            jnp.split(current_buffer_state.joint_observations[:-1, :, :, :], num_chunks),
+        )
 
     return split_buffer_state

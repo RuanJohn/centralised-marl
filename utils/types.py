@@ -19,6 +19,7 @@ class BufferState:
     key: chex.PRNGKey
     policy_hidden_states: jnp.ndarray = None 
     critic_hidden_states: jnp.ndarray = None
+    joint_observations: jnp.ndarray = None
 
 @chex.dataclass
 class BufferData: 
@@ -31,6 +32,7 @@ class BufferData:
     entropy: jnp.ndarray
     policy_hidden_state: jnp.ndarray = None 
     critic_hidden_state: jnp.ndarray = None
+    joint_observation: jnp.ndarray = None 
 
 @chex.dataclass
 class NetworkParams: 
