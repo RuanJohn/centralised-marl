@@ -54,13 +54,13 @@ ADAM_EPS = 1e-5
 POLICY_LAYER_SIZES = [64, 64]
 CRITIC_LAYER_SIZES = [64, 64]
 NORMALISE_ADVANTAGE = True
-ENV_NAME = "ma_gym:PredatorPrey5x5-v0"
+ENV_NAME = "ma_gym:Checkers-v0"
 # ENV_NAME = "CartPole-v1"
 MASTER_PRNGKEY = jax.random.PRNGKey(2022)
 MASTER_PRNGKEY, networks_key, actors_key, buffer_key = jax.random.split(MASTER_PRNGKEY, 4)
 
 ALGORITHM = "ff_central_ppo"
-LOG = True
+LOG = False
 
 if LOG: 
     logger = WandbLogger(
@@ -324,10 +324,10 @@ while global_step < 200_000:
         
         if global_step % (HORIZON + 1) == 0: 
             
-            # TODO: Switch back to slicing [:-1]
+            # TODO: Inviestigate slicing [:-1] vs [1:]
             advantages = rlax.truncated_generalized_advantage_estimation(
-                r_t = jnp.squeeze(system_state.buffer.rewards)[1:],
-                discount_t = (1 - jnp.squeeze(system_state.buffer.dones))[1:] * DISCOUNT_GAMMA,
+                r_t = jnp.squeeze(system_state.buffer.rewards)[:-1],
+                discount_t = (1 - jnp.squeeze(system_state.buffer.dones))[:-1] * DISCOUNT_GAMMA,
                 lambda_ = GAE_LAMBDA, 
                 values = jnp.squeeze(system_state.buffer.values),
                 stop_target_gradients=True
@@ -335,7 +335,7 @@ while global_step < 200_000:
 
             advantages = jax.lax.stop_gradient(advantages)
             # Just not sure how to index the values here. 
-            returns = advantages + jnp.squeeze(system_state.buffer.values)[1:]
+            returns = advantages + jnp.squeeze(system_state.buffer.values)[:-1]
             returns = jax.lax.stop_gradient(returns)
 
 
