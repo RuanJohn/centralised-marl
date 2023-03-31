@@ -14,6 +14,7 @@ class CentralControllerWrapper(gym.Env):
         self.metadata = {'render.modes': ['human', 'rgb_array']}
         self.zero_agent_mask = np.zeros(ma_env.n_agents)
         self._one_hot_ids = one_hot_ids 
+        self._grid_shape = ma_env._grid_shape
 
     def reset(self, ):
         

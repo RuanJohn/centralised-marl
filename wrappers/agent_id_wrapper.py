@@ -1,13 +1,16 @@
 import numpy as np 
+import gym
 
-class AgentIDWrapper:
+class AgentIDWrapper(gym.Env):
     def __init__(self, env):
+        super().__init__()
         self.env = env
         self.n_agents = env.n_agents
 
         self.observation_space = env.observation_space
         self.action_space = env.action_space
         self.agent_id_encoding = np.eye(self.n_agents)
+        self._grid_shape = env._grid_shape
 
     def _add_agent_id_to_observation(self, observations):
         return np.array([np.concatenate((self.agent_id_encoding[i], obs)) for i, obs in enumerate(observations)])

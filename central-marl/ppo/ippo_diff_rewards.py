@@ -1,5 +1,5 @@
-"""Independent multi-agent JAX PPO. This implementation 
-uses separate networks weights for each agent."""
+"""Independent multi-agent JAX PPO. NOte that this implementation 
+uses shared network weights between all agetns."""
 
 import os 
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"]="false"
@@ -12,6 +12,8 @@ import distrax
 import rlax
 import chex
 import time 
+import numpy as np
+import matplotlib.pyplot as plt
 
 from utils.types import (
     BufferData, 
@@ -24,6 +26,11 @@ from utils.replay_buffer import (
     create_buffer, 
     add, 
     reset_buffer,
+)
+
+from utils.extra_metrics import (
+    diff_reward_step, 
+    create_visitation_grids,
 )
 
 from utils.loggers import WandbLogger
@@ -49,12 +56,13 @@ CRITIC_LAYER_SIZES = [64, 64]
 
 # TODO: Add agent IDS. 
 ADD_ONE_HOT_IDS = False
-ENV_NAME = "ma_gym:Switch4-v0"
+ENV_NAME = "ma_gym:Checkers-v0"
+AGENT_NOOP_IDXS = [4, 4]
 MASTER_PRNGKEY = jax.random.PRNGKey(2022)
 MASTER_PRNGKEY, networks_key, actors_key, buffer_key = jax.random.split(MASTER_PRNGKEY, 4)
 
-NORMALISE_ADVANTAGE = False
-ADD_ENTROPY_LOSS = False
+NORMALISE_ADVANTAGE = True
+ADD_ENTROPY_LOSS = True
 
 ALGORITHM = "ff_indep_ppo"
 LOG = False
@@ -118,52 +126,40 @@ def make_networks(
 
 policy_network, critic_network = make_networks(num_actions=num_actions)
 
-all_policy_params = {}
-all_critic_params = {}
-
 # Create network params 
+
 dummy_obs_data = jnp.zeros(observation_dim, dtype=jnp.float32)
+networks_key, policy_init_key, critic_init_key = jax.random.split(networks_key, 3)
 
-for agent in range(num_agents):
-    networks_key, policy_init_key, critic_init_key = jax.random.split(networks_key, 3)
-
-    policy_params = policy_network.init(policy_init_key, dummy_obs_data)
-    critic_params = critic_network.init(critic_init_key, dummy_obs_data)
-
-    all_policy_params[agent] = policy_params
-    all_critic_params[agent] = critic_params
+policy_params = policy_network.init(policy_init_key, dummy_obs_data)
+critic_params = critic_network.init(critic_init_key, dummy_obs_data)
 
 network_params = NetworkParams(
-    policy_params=all_policy_params, 
-    critic_params=all_critic_params,
+    policy_params=policy_params, 
+    critic_params=critic_params,
 )
 
-all_policy_optimiser_states = {}
-all_critic_optimiser_states = {}
-
-for agent in range(num_agents):
-    policy_optimiser = optax.chain(
-        optax.clip_by_global_norm(MAX_GLOBAL_NORM),
-        optax.adam(learning_rate = POLICY_LR, eps = ADAM_EPS),
+# Create optimisers and states
+policy_optimiser = optax.chain(
+      optax.clip_by_global_norm(MAX_GLOBAL_NORM),
+      optax.adam(learning_rate = POLICY_LR, eps = ADAM_EPS),
     )
-    critic_optimiser = optax.chain(
-        optax.clip_by_global_norm(MAX_GLOBAL_NORM),
-        optax.adam(learning_rate = CRITIC_LR, eps = ADAM_EPS),
+critic_optimiser = optax.chain(
+    optax.clip_by_global_norm(MAX_GLOBAL_NORM),
+    optax.adam(learning_rate = CRITIC_LR, eps = ADAM_EPS),
     )
 
-    policy_optimiser_state = policy_optimiser.init(all_policy_params[agent])
-    critic_optimiser_state = critic_optimiser.init(all_critic_params[agent])
 
-    all_policy_optimiser_states[agent] = policy_optimiser_state
-    all_critic_optimiser_states[agent] = critic_optimiser_state
-
+policy_optimiser_state = policy_optimiser.init(policy_params)
+critic_optimiser_state = critic_optimiser.init(critic_params)
 
 # Better idea is probably a high level Policy and Critic state. 
 
 optimiser_states = OptimiserStates(
-    policy_state=all_policy_optimiser_states, 
-    critic_state=all_critic_optimiser_states, 
+    policy_state=policy_optimiser_state, 
+    critic_state=critic_optimiser_state, 
 )
+
 
 # Initialise buffer 
 buffer_state = create_buffer(
@@ -252,8 +248,8 @@ def update_policy(system_state: PPOSystemState, advantages, mb_idx):
         if NORMALISE_ADVANTAGE: 
             advantages_ = (advantages_ - jnp.mean(advantages_)) / (jnp.std(advantages_) + 1e-5)
         
-        policy_optimiser_state = system_state.optimiser_states.policy_state[agent]
-        policy_params = system_state.network_params.policy_params[agent]
+        policy_optimiser_state = system_state.optimiser_states.policy_state
+        policy_params = system_state.network_params.policy_params
 
         grads = jax.grad(policy_loss)(
             policy_params, 
@@ -267,8 +263,8 @@ def update_policy(system_state: PPOSystemState, advantages, mb_idx):
         updates, new_policy_optimiser_state = policy_optimiser.update(grads, policy_optimiser_state)
         new_policy_params = optax.apply_updates(policy_params, updates)
 
-        system_state.optimiser_states.policy_state[agent] = new_policy_optimiser_state
-        system_state.network_params.policy_params[agent] = new_policy_params
+        system_state.optimiser_states.policy_state = new_policy_optimiser_state
+        system_state.network_params.policy_params = new_policy_params
 
     return system_state
 
@@ -284,8 +280,8 @@ def update_critic(
         states_ = jnp.squeeze(system_state.buffer.states[:,:,agent,:])[mb_idx]
         returns_ = returns[:, agent][mb_idx]
         
-        critic_optimiser_state = system_state.optimiser_states.critic_state[agent]
-        critic_params = system_state.network_params.critic_params[agent]
+        critic_optimiser_state = system_state.optimiser_states.critic_state
+        critic_params = system_state.network_params.critic_params
 
         grads = jax.grad(critic_loss)(
             critic_params, 
@@ -296,8 +292,8 @@ def update_critic(
         updates, new_critic_optimiser_state = critic_optimiser.update(grads, critic_optimiser_state)
         new_critic_params = optax.apply_updates(critic_params, updates)
 
-        system_state.optimiser_states.critic_state[agent] = new_critic_optimiser_state
-        system_state.network_params.critic_params[agent] = new_critic_params
+        system_state.optimiser_states.critic_state = new_critic_optimiser_state
+        system_state.network_params.critic_params = new_critic_params
 
     return system_state
 
@@ -306,14 +302,14 @@ def update_critic(
 global_step = 0
 episode = 0 
 log_data = {}
-while global_step < 100_000: 
+while global_step < 20_000: 
 
     team_done = False 
     obs = env.reset()
     obs = jnp.array(obs, dtype=jnp.float32) 
     episode_return = 0
+    agent_diff_returns = {i : 0 for i in range(num_agents)}
     episode_step = 0 
-    team_entropy = []
     start_time = time.time()
     while not team_done: 
         
@@ -327,14 +323,15 @@ while global_step < 100_000:
         act_entropies = jnp.empty((num_agents), dtype=jnp.float32)
 
         for agent in range(num_agents):
+
             # logits = policy_network.apply(system_state.network_params.policy_params, jnp.array(obs[agent], dtype=jnp.float32))
-            logits = policy_network.apply(system_state.network_params.policy_params[agent], obs[agent])
+            logits = policy_network.apply(system_state.network_params.policy_params, obs[agent])
             actors_key = system_state.actors_key
             actors_key, action, logprob, entropy = choose_action(logits, actors_key)
             system_state.actors_key = actors_key
 
             # value = jnp.squeeze(critic_network.apply(system_state.network_params.critic_params, jnp.array(obs[agent], dtype=jnp.float32)))
-            value = jnp.squeeze(critic_network.apply(system_state.network_params.critic_params[agent], obs[agent]))
+            value = jnp.squeeze(critic_network.apply(system_state.network_params.critic_params, obs[agent]))
 
             step_joint_action = step_joint_action.at[agent].set(action)
             
@@ -345,6 +342,11 @@ while global_step < 100_000:
 
         # Covert action to int in order to step the env. 
         # Can also handle in the wrapper
+
+        diff_rewards = diff_reward_step(env, step_joint_action, AGENT_NOOP_IDXS)
+        for agent in range(num_agents):
+            agent_diff_returns[agent] += diff_rewards[agent]
+
         obs_, reward, done, _ = env.step(step_joint_action.tolist())  
         obs_ = jnp.array(obs_, dtype=jnp.float32)     
 
@@ -370,7 +372,6 @@ while global_step < 100_000:
         obs = obs_ 
         episode_return += jnp.sum(jnp.array(reward, dtype=jnp.float32))
         episode_step += 1 
-        team_entropy.append(jnp.mean(act_entropies))
         
         if global_step % (HORIZON + 1) == 0: 
             
@@ -428,7 +429,8 @@ while global_step < 100_000:
 
     episode += 1
     if episode % 10 == 0: 
-        print(f"EPISODE: {episode}, GLOBAL_STEP: {global_step}, EPISODE_RETURN: {jnp.round(episode_return, 3)}, SPS: {int(sps)}") 
-        print(f"TEAM_ENTROPY: {jnp.round(jnp.mean(jnp.array(team_entropy)), 3)}")  
+        print(f"EPISODE: {episode}, GLOBAL_STEP: {global_step}, EPISODE_RETURN: {jnp.round(episode_return, 3)}, SPS: {int(sps)}")  
+        diff_results=[f"AGENT_{i}: {jnp.round(agent_diff_returns[i], 3)}" for i in range(num_agents)] 
+        print(" ".join(diff_results))
 
 logger.close()  

@@ -1,11 +1,17 @@
 """Independent multi-agent JAX DQN."""
 
+import os 
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"]="false"
+
 import jax.numpy as jnp 
 import jax 
 import haiku as hk
 import optax
 import rlax
 import chex
+import distrax 
+import numpy as np 
+import matplotlib.pyplot as plt 
 
 from utils.types import (
     DQNBufferData, 
@@ -247,11 +253,15 @@ def update_policy(
 
 global_step = 0
 episode = 0 
-while global_step < 500_000: 
+
+# TODO: Log the team entropy. 
+
+while global_step < 500_00: 
 
     team_done = False 
     obs = env.reset()
     episode_return = 0
+    team_entropy = []
     while not team_done: 
 
         if can_sample(system_state.buffer): 
@@ -262,9 +272,15 @@ while global_step < 500_000:
 
         # Data to append to buffer
         act_joint_action = jnp.empty((num_agents,1), dtype=jnp.int32)
+        entropies = []
 
         for agent in range(num_agents):
+
             q_values = policy_network.apply(system_state.network_params.policy_params, jnp.array(obs[agent], dtype=jnp.float32))
+
+            dist = distrax.Categorical(logits=q_values)
+            entropy = dist.entropy()
+            entropies.append(entropy)
 
             actors_key = system_state.actors_key
             actors_key, action = choose_action(actors_key, q_values, EPSILON)
@@ -279,6 +295,7 @@ while global_step < 500_000:
         obs_, reward, done, _ = env.step(step_joint_action.tolist())
         team_done = all(done)
         global_step += 1 # TODO: With vec envs this should be more. 
+        team_entropy.append(jnp.mean(jnp.array(entropies)))
 
         # NB: Correct shapes here. 
         data = DQNBufferData(
@@ -307,4 +324,4 @@ while global_step < 500_000:
     
     episode += 1
     if episode % 1 == 0: 
-        print(f"EPISODE: {episode}, GLOBAL_STEP: {global_step}, EPISODE_RETURN: {episode_return}, EPSILON: {jnp.round(EPSILON, 2)}")   
+        print(f"EPISODE: {episode}, GLOBAL_STEP: {global_step}, EPISODE_RETURN: {episode_return}, EPSILON: {jnp.round(EPSILON, 2)}")  
