@@ -1,6 +1,9 @@
 """Independent multi-agent JAX PPO. NOte that this implementation 
 uses shared network weights between all agetns."""
 
+import os 
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"]="false"
+
 import jax.numpy as jnp 
 import jax 
 import haiku as hk
@@ -9,6 +12,8 @@ import distrax
 import rlax
 import chex
 import time 
+import copy 
+import numpy as np 
 
 from utils.types import (
     BufferData, 
@@ -43,9 +48,10 @@ MAX_GLOBAL_NORM = 0.5
 ADAM_EPS = 1e-5
 POLICY_LAYER_SIZES = [64, 64]
 CRITIC_LAYER_SIZES = [64, 64]
+NOOP_ACTION = 4
 
 # TODO: Add agent IDS. 
-ADD_ONE_HOT_IDS = True
+ADD_ONE_HOT_IDS = False
 ENV_NAME = "ma_gym:Switch2-v0"
 MASTER_PRNGKEY = jax.random.PRNGKey(2022)
 MASTER_PRNGKEY, networks_key, actors_key, buffer_key = jax.random.split(MASTER_PRNGKEY, 4)
@@ -290,6 +296,7 @@ def update_critic(
 global_step = 0
 episode = 0 
 log_data = {}
+per_agent_shapley_data = {f"agent_{i}": [] for i in range(num_agents)}
 while global_step < 100_000: 
 
     team_done = False 
@@ -328,11 +335,24 @@ while global_step < 100_000:
 
         # Covert action to int in order to step the env. 
         # Can also handle in the wrapper
+
+        real_action = step_joint_action.tolist()
+
+        # copy_envs = [copy.copy(env) for _ in range(num_agents)]
+        # modified_lists = [[NOOP_ACTION if i == j else real_action[j] for j in range(len(real_action))] for i in range(len(real_action))]
+        
+        # Here we are stepping the main thread env
         obs_, reward, done, _ = env.step(step_joint_action.tolist())  
+        team_reward = jnp.sum(jnp.array(reward, dtype=jnp.float32))
         obs_ = jnp.array(obs_, dtype=jnp.float32)     
 
         team_done = all(done)
         global_step += 1 # TODO: With vec envs this should be more. 
+
+        # for i in range(num_agents):
+        #     _, agent_reward, _, _ = copy_envs[i].step(modified_lists[i])
+        #     agent_team_reward = jnp.sum(jnp.array(agent_reward, dtype=jnp.float32))
+        #     per_agent_shapley_data[f"agent_{i}"].append(team_reward - agent_team_reward)
         
         # NB: Correct shapes here. 
         data = BufferData(
@@ -351,7 +371,7 @@ while global_step < 100_000:
         system_state.buffer = buffer_state
 
         obs = obs_ 
-        episode_return += jnp.sum(jnp.array(reward, dtype=jnp.float32))
+        episode_return += team_reward
         episode_step += 1 
         
         if global_step % (HORIZON + 1) == 0: 
@@ -400,6 +420,10 @@ while global_step < 100_000:
             buffer_state = reset_buffer(buffer_state) 
             system_state.buffer = buffer_state
 
+        if global_step % 10_000 == 0:
+            for i in range(num_agents):
+                print(f"Agent {i} Shapley Value: {np.mean(per_agent_shapley_data[f'agent_{i}'][-10000:])}")
+
     sps = episode_step / (time.time() - start_time)
 
     if LOG: 
@@ -410,6 +434,7 @@ while global_step < 100_000:
 
     episode += 1
     if episode % 10 == 0: 
-        print(f"EPISODE: {episode}, GLOBAL_STEP: {global_step}, EPISODE_RETURN: {jnp.round(episode_return, 3)}, SPS: {int(sps)}")   
+        print(f"EPISODE: {episode}, GLOBAL_STEP: {global_step}, EPISODE_RETURN: {jnp.round(episode_return, 3)}, SPS: {int(sps)}")
+        # Print the shaply value for each agent at the current step 
 
 logger.close()  
