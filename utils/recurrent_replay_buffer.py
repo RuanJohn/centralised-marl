@@ -48,7 +48,7 @@ def create_buffer(
     ) 
 
     if joint_observation_dim is not None: 
-        buffer_state.joint_observations = jnp.empty((buffer_size + 1, num_envs, num_agents, joint_observation_dim), dtype=jnp.float32), 
+        buffer_state.joint_observations = jnp.empty((buffer_size + 1, num_envs, joint_observation_dim), dtype=jnp.float32)
 
     return buffer_state
 

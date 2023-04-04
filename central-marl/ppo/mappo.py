@@ -389,9 +389,10 @@ while global_step < 100_000:
     policy_hidden_state = jnp.broadcast_to(policy_hidden_state, (num_agents, *policy_hidden_state.shape))
     new_policy_hidden_state = jnp.empty_like(policy_hidden_state)
     
+    # Only needs a single critic state. 
     critic_hidden_state = create_critic_hidden_states() 
-    critic_hidden_state = jnp.broadcast_to(critic_hidden_state, (num_agents, *critic_hidden_state.shape))
     new_critic_hidden_state = jnp.empty_like(critic_hidden_state)
+    
     while not team_done: 
         
         joint_obs = jnp.concatenate(obs)
@@ -426,19 +427,24 @@ while global_step < 100_000:
 
             new_policy_hidden_state = new_policy_hidden_state.at[agent].set(new_policy_hidden_state_)
         
+        # Only have to step the critic once for all agents with the joint obs. 
+        # Use the same hidden state globally and store at agent 0.
         value, new_critic_hidden_state_ = critic_network.apply(
                 system_state.network_params.critic_params, 
                 joint_obs, 
-                critic_hidden_state[agent])
+                critic_hidden_state)
             
         value = jnp.squeeze(value)
-
-        act_values = ...
-
         new_critic_hidden_state_ = jnp.expand_dims(new_critic_hidden_state_[0], axis=0)
+        new_critic_hidden_state = new_critic_hidden_state_
         
-        new_critic_hidden_state = new_critic_hidden_state.at[agent].set(new_critic_hidden_state_)
-
+        # Doing this to match replay buffer shapes.
+        store_critic_hidden_state = jnp.broadcast_to(critic_hidden_state, (num_agents, *critic_hidden_state.shape))
+        
+        # Each agent gets the same value. 
+        for agent in range(num_agents): 
+            act_values = act_values.at[agent].set(value)
+        
         # Covert action to int in order to step the env. 
         # Can also handle in the wrapper
         obs_, reward, done, _ = env.step(step_joint_action.tolist())  
@@ -456,12 +462,13 @@ while global_step < 100_000:
             log_prob = jnp.expand_dims(act_log_probs, axis=0), 
             value = jnp.expand_dims(act_values, axis=0), 
             entropy = jnp.expand_dims(act_entropies, axis=0), 
-            critic_hidden_state = jnp.expand_dims(critic_hidden_state, axis=0), 
+            critic_hidden_state = jnp.expand_dims(store_critic_hidden_state, axis=0), 
             policy_hidden_state = jnp.expand_dims(policy_hidden_state, axis=0), 
             joint_observation = jnp.expand_dims(joint_obs, axis=0), 
         )
 
         buffer_state = system_state.buffer 
+        # Fix adding the joint observation. 
         buffer_state = jit_add(buffer_state, data)
         # buffer_state = add(buffer_state, data)
         system_state.buffer = buffer_state
@@ -506,11 +513,7 @@ while global_step < 100_000:
                 jnp.split(returns, num_chunks)
             )
 
-            # TODO: 
-            # 1. VMAP over advantage and return calculations
-            # 2. Scan the epoch update
-            # 3. Scan / vmap over agents in the loss. 
-
+            # TODO: Split the joint obs and hidden states into chunks.
             system_state.train_buffer = split_buffer_into_chunks(system_state.buffer, num_chunks=num_chunks)
 
             for _ in range(NUM_EPOCHS):
