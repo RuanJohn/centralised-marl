@@ -338,8 +338,11 @@ while global_step < 100_000:
 
         real_action = step_joint_action.tolist()
 
-        # copy_envs = [copy.copy(env) for _ in range(num_agents)]
-        # modified_lists = [[NOOP_ACTION if i == j else real_action[j] for j in range(len(real_action))] for i in range(len(real_action))]
+        # Make env copies 
+        copy_envs = [copy.deepcopy(env) for _ in range(num_agents)]
+
+        # Replace agent action with NOOP
+        modified_lists = [[NOOP_ACTION if i == j else real_action[j] for j in range(len(real_action))] for i in range(len(real_action))]
         
         # Here we are stepping the main thread env
         obs_, reward, done, _ = env.step(step_joint_action.tolist())  
@@ -348,11 +351,12 @@ while global_step < 100_000:
 
         team_done = all(done)
         global_step += 1 # TODO: With vec envs this should be more. 
-
-        # for i in range(num_agents):
-        #     _, agent_reward, _, _ = copy_envs[i].step(modified_lists[i])
-        #     agent_team_reward = jnp.sum(jnp.array(agent_reward, dtype=jnp.float32))
-        #     per_agent_shapley_data[f"agent_{i}"].append(team_reward - agent_team_reward)
+        
+        # Step copied environments
+        for i in range(num_agents):
+            _, agent_reward, _, _ = copy_envs[i].step(modified_lists[i])
+            agent_team_reward = jnp.sum(jnp.array(agent_reward, dtype=jnp.float32))
+            per_agent_shapley_data[f"agent_{i}"].append(team_reward - agent_team_reward)
         
         # NB: Correct shapes here. 
         data = BufferData(
@@ -420,6 +424,7 @@ while global_step < 100_000:
             buffer_state = reset_buffer(buffer_state) 
             system_state.buffer = buffer_state
 
+        # Compute monte carlo shapley value 
         if global_step % 10_000 == 0:
             for i in range(num_agents):
                 print(f"Agent {i} Shapley Value: {np.mean(per_agent_shapley_data[f'agent_{i}'][-10000:])}")
