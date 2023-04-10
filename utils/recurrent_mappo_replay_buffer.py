@@ -15,6 +15,7 @@ def create_buffer(
     critic_hidden_state_dim: tuple, 
     action_dim: int = 1, 
     buffer_key: chex.PRNGKey = random.PRNGKey(0),
+    joint_observation_dim: int = None, 
 ) -> BufferState: 
 
     """A simple trajectory buffer. 
@@ -42,10 +43,11 @@ def create_buffer(
         entropy = jnp.empty((buffer_size + 1, num_envs, num_agents), dtype=jnp.float32),
         policy_hidden_states = jnp.empty((buffer_size + 1, num_envs, num_agents, *policy_hidden_state_dim), dtype=jnp.float32), 
         critic_hidden_states = jnp.empty((buffer_size + 1, num_envs, num_agents, *critic_hidden_state_dim), dtype=jnp.float32), 
+        joint_observations = jnp.empty((buffer_size + 1, num_envs, joint_observation_dim), dtype=jnp.float32),
         counter = jnp.int32(0), 
-        key = buffer_key, 
-    )
-
+        key = buffer_key,   
+    ) 
+        
     return buffer_state
 
 def add(
@@ -62,6 +64,7 @@ def add(
     buffer_state.entropy = buffer_state.entropy.at[buffer_state.counter].set(data.entropy)
     buffer_state.policy_hidden_states = buffer_state.policy_hidden_states.at[buffer_state.counter].set(data.policy_hidden_state)
     buffer_state.critic_hidden_states = buffer_state.critic_hidden_states.at[buffer_state.counter].set(data.critic_hidden_state)
+    buffer_state.joint_observations = buffer_state.joint_observations.at[buffer_state.counter].set(data.joint_observation)
 
     buffer_state.counter += 1
 
@@ -81,6 +84,7 @@ def reset_buffer(buffer_state) -> BufferState:
         entropy = jnp.empty_like(current_buffer_state.entropy), 
         policy_hidden_states = jnp.empty_like(current_buffer_state.policy_hidden_states),
         critic_hidden_states = jnp.empty_like(current_buffer_state.critic_hidden_states),
+        joint_observations = jnp.empty_like(current_buffer_state.joint_observations),
         counter = jnp.int32(0), 
         key = current_buffer_state.key, 
     )
@@ -127,6 +131,9 @@ def split_buffer_into_chunks(
         ),
         critic_hidden_states = jnp.array(
             jnp.split(current_buffer_state.critic_hidden_states[:-1, :, :, :, :], num_chunks),
+        ),
+        joint_observations = jnp.array(
+            jnp.split(current_buffer_state.joint_observations[:-1, :, :], num_chunks),
         ),
         counter = current_buffer_state.counter, 
         key = current_buffer_state.key, 

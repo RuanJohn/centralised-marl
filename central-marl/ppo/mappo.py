@@ -17,7 +17,7 @@ from utils.types import (
     OptimiserStates, 
 )
 
-from utils.recurrent_replay_buffer import (
+from utils.recurrent_mappo_replay_buffer import (
     create_buffer, 
     add, 
     reset_buffer,
@@ -283,24 +283,21 @@ def critic_loss(
     critic_hidden_states_,
     ):
 
-    new_values = jnp.empty_like(returns)
-
     def critic_core(input: jnp.ndarray, hidden_state: jnp.ndarray) -> jnp.ndarray:
         
         return critic_network.apply(critic_params, input, hidden_state)
 
     critic_hidden_states_ = critic_hidden_states_[:, 0, :, :]
     
-    for agent in range(num_agents): 
-        new_values_, _ = hk.static_unroll(
-            critic_core, 
-            states[:,:,agent,:], 
-            critic_hidden_states_[:, agent, :, :], 
-            time_major=False, 
-        )
-        
-        new_values_ = jnp.squeeze(new_values_)
-        new_values = new_values.at[:, :, agent].set(new_values_)
+    # Only one "agent" now due to being central
+    new_values, _ = hk.static_unroll(
+        critic_core, 
+        states, 
+        critic_hidden_states_, 
+        time_major=False, 
+    )
+    
+    new_values = jnp.squeeze(new_values)
     
     loss = 0.5 * ((new_values - returns) ** 2).mean()
     # jax.debug.print("critic loss {x}", x= loss)
@@ -349,9 +346,13 @@ def update_critic(
     mb_idx,
 ): 
 
-    states_ = jnp.squeeze(system_state.train_buffer.states)[mb_idx]
-    critic_hidden_states_ = jnp.squeeze(system_state.train_buffer.critic_hidden_states, axis=2)[mb_idx]
-    returns_ = returns[mb_idx]
+    # There is a central critic now. So need to get correct central state. 
+    states_ = jnp.squeeze(system_state.train_buffer.joint_observations)[mb_idx]
+    # Select only the cirst hidden states. 
+    critic_hidden_states_ = jnp.squeeze(system_state.train_buffer.critic_hidden_states[:, :, :, 0, :, :], axis=2)[mb_idx]
+    
+    # Select only returns 0
+    returns_ = returns[:, :, 0][mb_idx]
     
     critic_optimiser_state = system_state.optimiser_states.critic_state
     critic_params = system_state.network_params.critic_params
