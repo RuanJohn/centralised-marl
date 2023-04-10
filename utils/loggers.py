@@ -7,7 +7,7 @@ class WandbLogger:
     def __init__(
             self,  
             exp_config: dict, 
-            project_name: str = "centralised-marl",
+            project_name: str = "centralised-marl-ppo-sweep",
             # TODO set this as an env variable
             # api_token = os.environ["WANDB_API_TOKEN"], 
             run_name: Optional[str] = None, 
