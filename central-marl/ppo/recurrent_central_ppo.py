@@ -2,6 +2,9 @@
    Essentially centralised training with centralised execution. 
 """
 
+import os 
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"]="false"
+
 import jax.numpy as jnp 
 import jax 
 import haiku as hk
@@ -9,6 +12,7 @@ import optax
 import distrax
 import rlax
 import chex
+import time 
 
 from utils.types import (
     BufferData, 
@@ -48,21 +52,23 @@ NUM_EPOCHS = 1
 NUM_MINIBATCHES = 4 
 MAX_GLOBAL_NORM = 0.5
 ADAM_EPS = 1e-5
-POLICY_LAYER_SIZES = [32]
-CRITIC_LAYER_SIZES = [32]
+POLICY_LAYER_SIZES = [64]
+CRITIC_LAYER_SIZES = [64]
 
 # NOTE: Can only handle single recurrent layer at
 # the moment. 
-POLICY_RECURRENT_LAYER_SIZES = [32]
-CRITIC_RECURRENT_LAYER_SIZES = [32]
+POLICY_RECURRENT_LAYER_SIZES = [64]
+CRITIC_RECURRENT_LAYER_SIZES = [64]
 
-ENV_NAME = "ma_gym:Switch2-v0"
+ENV_NAME = "ma_gym:Switch4-v0"
 # ENV_NAME = "CartPole-v0"
 MASTER_PRNGKEY = jax.random.PRNGKey(2022)
 MASTER_PRNGKEY, networks_key, actors_key, buffer_key = jax.random.split(MASTER_PRNGKEY, 4)
 
 ALGORITHM = "rec_central_ppo"
-LOG = False
+LOG = True
+NORMALISE_ADVANTAGE = True
+
 
 if LOG: 
     logger = WandbLogger(
@@ -263,6 +269,9 @@ def policy_loss(
 
     logratio = new_log_probs - old_log_probs
     ratio = jnp.exp(logratio)
+    
+    if NORMALISE_ADVANTAGE: 
+        advantages = (advantages - jnp.mean(advantages)) / (jnp.std(advantages) + 1e-5)
 
     # Policy loss
     loss_term_1 = -advantages * ratio
@@ -368,6 +377,8 @@ while global_step < 100_000:
     done = False 
     obs = env.reset()
     episode_return = 0
+    episode_step = 0 
+    start_time = time.time()
 
     # Reset hidden states when new episode starts. 
     system_state.network_params.policy_hidden_state = policy_init_state_fn.apply(None)
@@ -421,6 +432,7 @@ while global_step < 100_000:
 
         obs = obs_ 
         episode_return += reward
+        episode_step += 1
         
         # STEPS FOR UPDATING: 
         # 1. Compute advantage and returns 
@@ -480,14 +492,18 @@ while global_step < 100_000:
             buffer_state = reset_buffer(buffer_state) 
             system_state.buffer = buffer_state
     
+    sps = episode_step / (time.time() - start_time)
+
     if LOG: 
         log_data["episode"] = episode
         log_data["episode_return"] = episode_return
         log_data["global_step"] = global_step
+        log_data["sps"] = sps
         logger.write(logging_details=log_data)
 
     episode += 1
     if episode % 10 == 0: 
         print(f"EPISODE: {episode}, GLOBAL_STEP: {global_step}, EPISODE_RETURN: {episode_return}")   
 
-logger.close()  
+if LOG: 
+    logger.close()  

@@ -1,6 +1,9 @@
 """Independent multi-agent JAX PPO. NOte that this implementation 
 uses shared network weights between all agetns."""
 
+import os 
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"]="false"
+
 import jax.numpy as jnp 
 import jax 
 import haiku as hk
@@ -50,15 +53,15 @@ CRITIC_RECURRENT_LAYER_SIZES = [64]
 
 # TODO: Add agent IDS. 
 ADD_ONE_HOT_IDS = False
-ENV_NAME = "ma_gym:Switch2-v0"
+ENV_NAME = "ma_gym:Switch4-v0"
 MASTER_PRNGKEY = jax.random.PRNGKey(2022)
 MASTER_PRNGKEY, networks_key, actors_key, buffer_key = jax.random.split(MASTER_PRNGKEY, 4)
 
-NORMALISE_ADVANTAGE = False
+NORMALISE_ADVANTAGE = True
 ADD_ENTROPY_LOSS = False
 
-ALGORITHM = "rec_indep_ppo"
-LOG = False
+ALGORITHM = "rec_mappo"
+LOG = True
 
 if LOG: 
     logger = WandbLogger(
@@ -92,10 +95,11 @@ if ADD_ONE_HOT_IDS:
 num_actions = env.action_space[0].n
 num_agents = env.n_agents
 observation_dim = env.observation_space[0].shape[0]
-critic_observation_dim = observation_dim * num_agents
 
 if ADD_ONE_HOT_IDS: 
     observation_dim += num_agents
+
+critic_observation_dim = observation_dim * num_agents
 
 # Make networks 
 
@@ -377,7 +381,7 @@ def update_critic(
 global_step = 0
 episode = 0 
 log_data = {}
-while global_step < 100_000: 
+while global_step < 200_000: 
 
     team_done = False 
     obs = env.reset()
@@ -541,10 +545,12 @@ while global_step < 100_000:
         log_data["episode"] = episode
         log_data["episode_return"] = episode_return
         log_data["global_step"] = global_step
+        log_data["sps"] = sps
         logger.write(logging_details=log_data)
 
     episode += 1
     if episode % 10 == 0: 
         print(f"EPISODE: {episode}, GLOBAL_STEP: {global_step}, EPISODE_RETURN: {jnp.round(episode_return, 3)}, SPS: {int(sps)}")   
 
-logger.close()  
+if LOG: 
+    logger.close()  

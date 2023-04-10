@@ -2,6 +2,9 @@
    Essentially centralised training with centralised execution. 
 """
 
+import os 
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"]="false"
+
 import jax.numpy as jnp 
 import jax 
 import haiku as hk
@@ -54,13 +57,13 @@ ADAM_EPS = 1e-5
 POLICY_LAYER_SIZES = [64, 64]
 CRITIC_LAYER_SIZES = [64, 64]
 NORMALISE_ADVANTAGE = True
-ENV_NAME = "ma_gym:Checkers-v0"
+ENV_NAME = "ma_gym:Switch4-v0"
 # ENV_NAME = "CartPole-v1"
 MASTER_PRNGKEY = jax.random.PRNGKey(2022)
 MASTER_PRNGKEY, networks_key, actors_key, buffer_key = jax.random.split(MASTER_PRNGKEY, 4)
 
 ALGORITHM = "ff_central_ppo"
-LOG = False
+LOG = True
 
 if LOG: 
     logger = WandbLogger(
@@ -363,8 +366,12 @@ while global_step < 200_000:
         log_data["episode"] = episode
         log_data["episode_return"] = episode_return
         log_data["global_step"] = global_step
+        log_data["sps"] = sps
         logger.write(logging_details=log_data)
 
     episode += 1
     if episode % 10 == 0: 
         print(f"EPISODE: {episode}, GLOBAL_STEP: {global_step}, EPISODE_RETURN: {episode_return}, SPS: {int(sps)}")   
+
+if LOG: 
+    logger.close()

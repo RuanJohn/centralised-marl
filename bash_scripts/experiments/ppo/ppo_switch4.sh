@@ -1,0 +1,1 @@
+python ./central-marl/ppo/mappo.py && python ./central-marl/ppo/ippo.py

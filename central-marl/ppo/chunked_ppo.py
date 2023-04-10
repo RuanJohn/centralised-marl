@@ -2,6 +2,9 @@
     value decomposition and fully centralised MARL. 
 """
 
+import os 
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"]="false"
+
 import jax.numpy as jnp 
 import numpy as np 
 import jax 
@@ -60,7 +63,8 @@ MASTER_PRNGKEY = jax.random.PRNGKey(2022)
 MASTER_PRNGKEY, networks_key, actors_key, buffer_key = jax.random.split(MASTER_PRNGKEY, 4)
 
 ALGORITHM = "ff_chunked_ppo"
-LOG = False 
+LOG = True
+NORMALISE_ADVANTAGE = True 
 
 if LOG: 
     logger = WandbLogger(
@@ -79,6 +83,7 @@ if LOG:
         "adam_epsilon": ADAM_EPS, 
         "policy_layer_sizes": POLICY_LAYER_SIZES, 
         "critic_layer_sizes": CRITIC_LAYER_SIZES, 
+        "normalise_advantage": NORMALISE_ADVANTAGE,
         },  
     )
 
@@ -239,6 +244,8 @@ def policy_loss(
 
     # Option 2.
     # TODO: Make this better.  
+    if NORMALISE_ADVANTAGE:
+        advantages = (advantages - jnp.mean(advantages)) / (jnp.std(advantages) + 1e-5)
     advantages = jnp.stack([advantages] * num_agents).T
 
     # Policy loss
@@ -352,7 +359,7 @@ def epoch_update(carry, none_in):
 global_step = 0
 episode = 0
 log_data = {}
-while global_step < 250_000: 
+while global_step < 200_000: 
 
     done = False 
     obs = env.reset()
@@ -446,7 +453,7 @@ while global_step < 250_000:
         log_data["episode"] = episode
         log_data["episode_return"] = episode_return
         log_data["global_step"] = global_step
-        log_data["steps_per_second"] = sps
+        log_data["sps"] = sps
         logger.write(logging_details=log_data)
     
     episode += 1
@@ -454,4 +461,5 @@ while global_step < 250_000:
     if episode % 10 == 0: 
         print(f"EPISODE: {episode}, GLOBAL_STEP: {global_step}, EPISODE_RETURN: {episode_return}, SPS: {sps}")   
 
-logger.close()
+if LOG: 
+    logger.close()
