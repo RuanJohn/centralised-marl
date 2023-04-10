@@ -537,4 +537,5 @@ while global_step < 200_000:
     if episode % 10 == 0: 
         print(f"EPISODE: {episode}, GLOBAL_STEP: {global_step}, EPISODE_RETURN: {jnp.round(episode_return, 3)}, SPS: {int(sps)}")   
 
-logger.close()  
+if LOG: 
+    logger.close()  

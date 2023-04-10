@@ -372,7 +372,7 @@ def update_critic(
 global_step = 0
 episode = 0 
 log_data = {}
-while global_step < 100_000: 
+while global_step < 200_000: 
 
     done = False 
     obs = env.reset()
