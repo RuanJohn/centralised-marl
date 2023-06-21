@@ -2,28 +2,29 @@
    Essentially centralised training with centralised execution. 
 """
 
-import os 
-os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"]="false"
+import os
 
-import jax.numpy as jnp 
-import jax 
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+
+import jax.numpy as jnp
+import jax
 import haiku as hk
 import optax
 import distrax
 import rlax
 import chex
-import time 
+import time
 
 from utils.types import (
-    BufferData, 
-    PPOSystemState, 
+    BufferData,
+    PPOSystemState,
     NetworkParams,
-    OptimiserStates, 
+    OptimiserStates,
 )
 
 from utils.recurrent_replay_buffer import (
-    create_buffer, 
-    add, 
+    create_buffer,
+    add,
     reset_buffer,
     split_buffer_into_chunks,
 )
@@ -40,237 +41,253 @@ from wrappers.ma_gym_wrapper import CentralControllerWrapper
 
 import gym
 
-# Constants: 
-HORIZON = 200 
-RECURRENT_CHUNK_LENGTH = 10 
-CLIP_EPSILON = 0.2 
+# Constants:
+HORIZON = 200
+RECURRENT_CHUNK_LENGTH = 10
+CLIP_EPSILON = 0.2
 POLICY_LR = 0.005
 CRITIC_LR = 0.005
-DISCOUNT_GAMMA = 0.99 
+DISCOUNT_GAMMA = 0.99
 GAE_LAMBDA = 0.95
 NUM_EPOCHS = 1
-NUM_MINIBATCHES = 4 
+NUM_MINIBATCHES = 4
 MAX_GLOBAL_NORM = 0.5
 ADAM_EPS = 1e-5
 POLICY_LAYER_SIZES = [64]
 CRITIC_LAYER_SIZES = [64]
 
 # NOTE: Can only handle single recurrent layer at
-# the moment. 
+# the moment.
 POLICY_RECURRENT_LAYER_SIZES = [64]
 CRITIC_RECURRENT_LAYER_SIZES = [64]
 
 ENV_NAME = "ma_gym:Switch4-v0"
 # ENV_NAME = "CartPole-v0"
 MASTER_PRNGKEY = jax.random.PRNGKey(2022)
-MASTER_PRNGKEY, networks_key, actors_key, buffer_key = jax.random.split(MASTER_PRNGKEY, 4)
+MASTER_PRNGKEY, networks_key, actors_key, buffer_key = jax.random.split(
+    MASTER_PRNGKEY, 4
+)
 
 ALGORITHM = "rec_central_ppo"
 LOG = True
 NORMALISE_ADVANTAGE = True
 
 
-if LOG: 
+if LOG:
     logger = WandbLogger(
         exp_config={
-        "algorithm": ALGORITHM,
-        "env_name": ENV_NAME,
-        "horizon": HORIZON, 
-        "clip_epsilon": CLIP_EPSILON, 
-        "policy_lr": POLICY_LR, 
-        "critic_lr": CRITIC_LR, 
-        "gamma": DISCOUNT_GAMMA, 
-        "gae_lambda": GAE_LAMBDA, 
-        "num_epochs": NUM_EPOCHS, 
-        "num_minibatches": NUM_MINIBATCHES,
-        "max_global_norm": MAX_GLOBAL_NORM,
-        "adam_epsilon": ADAM_EPS, 
-        "policy_layer_sizes": POLICY_LAYER_SIZES, 
-        "critic_layer_sizes": CRITIC_LAYER_SIZES, 
-        "policy_recurrent_layer_sizes": POLICY_RECURRENT_LAYER_SIZES, 
-        "critic_recurrent_layer_sizes": CRITIC_RECURRENT_LAYER_SIZES, 
-        },  
+            "algorithm": ALGORITHM,
+            "env_name": ENV_NAME,
+            "horizon": HORIZON,
+            "clip_epsilon": CLIP_EPSILON,
+            "policy_lr": POLICY_LR,
+            "critic_lr": CRITIC_LR,
+            "gamma": DISCOUNT_GAMMA,
+            "gae_lambda": GAE_LAMBDA,
+            "num_epochs": NUM_EPOCHS,
+            "num_minibatches": NUM_MINIBATCHES,
+            "max_global_norm": MAX_GLOBAL_NORM,
+            "adam_epsilon": ADAM_EPS,
+            "policy_layer_sizes": POLICY_LAYER_SIZES,
+            "critic_layer_sizes": CRITIC_LAYER_SIZES,
+            "policy_recurrent_layer_sizes": POLICY_RECURRENT_LAYER_SIZES,
+            "critic_recurrent_layer_sizes": CRITIC_RECURRENT_LAYER_SIZES,
+        },
     )
 
 env = gym.make(ENV_NAME)
 
-# Uncomment for centralised marl envs. 
+# Uncomment for centralised marl envs.
 env = CentralControllerWrapper(env)
 
 observation_dim = env.observation_space.shape[0]
 num_actions = env.action_space.n
 
-# Make networks 
+# Make networks
+
 
 def make_networks(
-    num_actions: int, 
+    num_actions: int,
     policy_layer_sizes: list = POLICY_LAYER_SIZES,
     policy_recurrent_layer_sizes: list = POLICY_RECURRENT_LAYER_SIZES,
-    critic_layer_sizes: list = CRITIC_LAYER_SIZES, 
-    critic_recurrent_layer_sizes: list = CRITIC_RECURRENT_LAYER_SIZES, ):
-
+    critic_layer_sizes: list = CRITIC_LAYER_SIZES,
+    critic_recurrent_layer_sizes: list = CRITIC_RECURRENT_LAYER_SIZES,
+):
     @hk.without_apply_rng
     @hk.transform
     def policy_network(x, y):
-        
-        # TODO: Have extra layers later on. For now just a single 
-        # recurrent layer. 
-        # NOTE: Should there be activations between layers? 
+        # TODO: Have extra layers later on. For now just a single
+        # recurrent layer.
+        # NOTE: Should there be activations between layers?
 
         return hk.DeepRNN(
-            [hk.nets.MLP(policy_layer_sizes, activate_final=True), 
-            hk.GRU(*policy_recurrent_layer_sizes), 
-            hk.Linear(num_actions)])(x, y)
+            [
+                hk.nets.MLP(policy_layer_sizes, activate_final=True),
+                hk.GRU(*policy_recurrent_layer_sizes),
+                hk.Linear(num_actions),
+            ]
+        )(x, y)
 
     @hk.without_apply_rng
     @hk.transform
     def critic_nerwork(x, y):
-
         return hk.DeepRNN(
-            [hk.nets.MLP(critic_layer_sizes, activate_final=True), 
-            hk.GRU(*critic_recurrent_layer_sizes), 
-            hk.Linear(1)])(x, y)
+            [
+                hk.nets.MLP(critic_layer_sizes, activate_final=True),
+                hk.GRU(*critic_recurrent_layer_sizes),
+                hk.Linear(1),
+            ]
+        )(x, y)
 
-    return policy_network, critic_nerwork,  
+    return (
+        policy_network,
+        critic_nerwork,
+    )
 
-# TODO: pass in layer sizes here. 
-def make_init_state_fns(): 
 
+# TODO: pass in layer sizes here.
+def make_init_state_fns():
     @hk.without_apply_rng
     @hk.transform
-    def policy_init_state(batch_size=1): 
-
+    def policy_init_state(batch_size=1):
         init_state_size = jax.lax.cond(
-            batch_size > 1, 
-            lambda: batch_size, 
+            batch_size > 1,
+            lambda: batch_size,
             lambda: 1,
         )
 
         return hk.GRU(*POLICY_RECURRENT_LAYER_SIZES).initial_state(init_state_size)
-    
+
     @hk.without_apply_rng
     @hk.transform
-    def critic_init_state(batch_size=1): 
-
+    def critic_init_state(batch_size=1):
         init_state_size = jax.lax.cond(
-            batch_size > 1, 
-            lambda: batch_size, 
+            batch_size > 1,
+            lambda: batch_size,
             lambda: 1,
         )
 
         return hk.GRU(*CRITIC_RECURRENT_LAYER_SIZES).initial_state(init_state_size)
 
-    return policy_init_state, critic_init_state, 
+    return (
+        policy_init_state,
+        critic_init_state,
+    )
+
 
 policy_network, critic_network = make_networks(num_actions=num_actions)
 policy_init_state_fn, critic_init_state_fn = make_init_state_fns()
 
-# Create network params 
+# Create network params
 dummy_obs_data = jnp.zeros(observation_dim, dtype=jnp.float32)
 policy_hidden_state = policy_init_state_fn.apply(None)
 critic_hidden_state = critic_init_state_fn.apply(None)
 networks_key, policy_init_key, critic_init_key = jax.random.split(networks_key, 3)
 
-policy_params = policy_network.init(policy_init_key, x = dummy_obs_data, y = policy_hidden_state)
-critic_params = critic_network.init(critic_init_key, x = dummy_obs_data, y = critic_hidden_state)
+policy_params = policy_network.init(
+    policy_init_key, x=dummy_obs_data, y=policy_hidden_state
+)
+critic_params = critic_network.init(
+    critic_init_key, x=dummy_obs_data, y=critic_hidden_state
+)
 
 network_params = NetworkParams(
-    policy_params=policy_params, 
+    policy_params=policy_params,
     critic_params=critic_params,
-    policy_hidden_state=policy_hidden_state, 
-    critic_hidden_state=critic_hidden_state, 
-    policy_init_state=policy_hidden_state, 
-    critic_init_state=critic_hidden_state, 
+    policy_hidden_state=policy_hidden_state,
+    critic_hidden_state=critic_hidden_state,
+    policy_init_state=policy_hidden_state,
+    critic_init_state=critic_hidden_state,
 )
 
 # Create optimisers and states
 policy_optimiser = optax.chain(
-      optax.clip_by_global_norm(MAX_GLOBAL_NORM),
-      optax.adam(learning_rate = POLICY_LR, eps = ADAM_EPS),
-    )
+    optax.clip_by_global_norm(MAX_GLOBAL_NORM),
+    optax.adam(learning_rate=POLICY_LR, eps=ADAM_EPS),
+)
 critic_optimiser = optax.chain(
     optax.clip_by_global_norm(MAX_GLOBAL_NORM),
-    optax.adam(learning_rate = CRITIC_LR, eps = ADAM_EPS),
-    )
+    optax.adam(learning_rate=CRITIC_LR, eps=ADAM_EPS),
+)
 
 
 policy_optimiser_state = policy_optimiser.init(policy_params)
 critic_optimiser_state = critic_optimiser.init(critic_params)
 
-# Better idea is probably a high level Policy and Critic state. 
+# Better idea is probably a high level Policy and Critic state.
 
 optimiser_states = OptimiserStates(
-    policy_state=policy_optimiser_state, 
-    critic_state=critic_optimiser_state, 
+    policy_state=policy_optimiser_state,
+    critic_state=critic_optimiser_state,
 )
 
-# Initialise buffer 
+# Initialise buffer
 buffer_state = create_buffer(
-    buffer_size=HORIZON, 
-    num_agents=1, 
-    num_envs=1, 
-    observation_dim=observation_dim, 
-    # NOTE: Need to pay attention here. 
-    policy_hidden_state_dim=policy_hidden_state.shape, 
-    critic_hidden_state_dim=critic_hidden_state.shape, 
+    buffer_size=HORIZON,
+    num_agents=1,
+    num_envs=1,
+    observation_dim=observation_dim,
+    # NOTE: Need to pay attention here.
+    policy_hidden_state_dim=policy_hidden_state.shape,
+    critic_hidden_state_dim=critic_hidden_state.shape,
 )
 
 system_state = PPOSystemState(
-    buffer=buffer_state, 
-    actors_key=actors_key, 
-    networks_key=networks_key, 
-    network_params=network_params, 
-    optimiser_states=optimiser_states, 
-) 
+    buffer=buffer_state,
+    actors_key=actors_key,
+    networks_key=networks_key,
+    network_params=network_params,
+    optimiser_states=optimiser_states,
+)
+
 
 @jax.jit
 @chex.assert_max_traces(n=1)
 def choose_action(
-    logits,  
+    logits,
     actors_key,
-    ):
-    
+):
     actors_key, sample_key = jax.random.split(actors_key)
 
     dist = distrax.Categorical(logits=logits)
 
     action, logprob = dist.sample_and_log_prob(
-        seed = sample_key, 
+        seed=sample_key,
     )
     entropy = dist.entropy()
 
     return actors_key, action, logprob, entropy
 
-def policy_loss(
-    policy_params, 
-    policy_hidden_states,
-    states, 
-    actions, 
-    old_log_probs, 
-    advantages, ):
 
-    # select only first hidden state of each chunk in the batch 
+def policy_loss(
+    policy_params,
+    policy_hidden_states,
+    states,
+    actions,
+    old_log_probs,
+    advantages,
+):
+    # select only first hidden state of each chunk in the batch
     policy_hidden_states = policy_hidden_states[:, 0, :, :]
 
     def core(input: jnp.ndarray, hidden_state: jnp.ndarray) -> jnp.ndarray:
-        
         return policy_network.apply(policy_params, input, hidden_state)
 
     logits, _ = hk.static_unroll(
-        core, 
-        states, 
-        policy_hidden_states, 
-        time_major=False, 
+        core,
+        states,
+        policy_hidden_states,
+        time_major=False,
     )
-    
+
     dist = distrax.Categorical(logits=logits)
 
     new_log_probs = dist.log_prob(value=actions)
 
     logratio = new_log_probs - old_log_probs
     ratio = jnp.exp(logratio)
-    
-    if NORMALISE_ADVANTAGE: 
+
+    if NORMALISE_ADVANTAGE:
         advantages = (advantages - jnp.mean(advantages)) / (jnp.std(advantages) + 1e-5)
 
     # Policy loss
@@ -280,57 +297,55 @@ def policy_loss(
 
     return loss
 
-def critic_loss(
-    critic_params, 
-    critic_hidden_states, 
-    states, 
-    returns
-    ):
 
-    # select only first hidden state of each chunk in the batch 
+def critic_loss(critic_params, critic_hidden_states, states, returns):
+    # select only first hidden state of each chunk in the batch
     critic_hidden_states = critic_hidden_states[:, 0, :, :]
 
     def core(input: jnp.ndarray, hidden_state: jnp.ndarray) -> jnp.ndarray:
-        
         return critic_network.apply(critic_params, input, hidden_state)
 
     new_values, _ = hk.static_unroll(
-        core, 
-        states, 
-        critic_hidden_state, 
-        time_major=False, 
+        core,
+        states,
+        critic_hidden_state,
+        time_major=False,
     )
-    
+
     new_values = jnp.squeeze(new_values)
 
     loss = 0.5 * ((new_values - returns) ** 2).mean()
 
     return loss
 
+
 @jax.jit
 @chex.assert_max_traces(n=1)
-def update_policy(system_state: PPOSystemState, advantages, mb_idx): 
-
+def update_policy(system_state: PPOSystemState, advantages, mb_idx):
     states = jnp.squeeze(system_state.train_buffer.states)[mb_idx]
     old_log_probs = jnp.squeeze(system_state.train_buffer.log_probs)[mb_idx]
     actions = jnp.squeeze(system_state.train_buffer.actions)[mb_idx]
     advantages = advantages[mb_idx]
-    
+
     policy_optimiser_state = system_state.optimiser_states.policy_state
     policy_params = system_state.network_params.policy_params
     # policy hidden states should only be the first one of each chunk
-    policy_hidden_states = jnp.squeeze(system_state.train_buffer.policy_hidden_states, axis=(2, 3))[mb_idx]
+    policy_hidden_states = jnp.squeeze(
+        system_state.train_buffer.policy_hidden_states, axis=(2, 3)
+    )[mb_idx]
 
     grads = jax.grad(policy_loss)(
-        policy_params, 
-        policy_hidden_states, 
-        states, 
-        actions, 
-        old_log_probs, 
+        policy_params,
+        policy_hidden_states,
+        states,
+        actions,
+        old_log_probs,
         advantages,
     )
 
-    updates, new_policy_optimiser_state = policy_optimiser.update(grads, policy_optimiser_state)
+    updates, new_policy_optimiser_state = policy_optimiser.update(
+        grads, policy_optimiser_state
+    )
     new_policy_params = optax.apply_updates(policy_params, updates)
 
     system_state.optimiser_states.policy_state = new_policy_optimiser_state
@@ -338,30 +353,30 @@ def update_policy(system_state: PPOSystemState, advantages, mb_idx):
 
     return system_state
 
+
 @jax.jit
 @chex.assert_max_traces(n=1)
-def update_critic(
-    system_state: PPOSystemState, 
-    returns,
-    mb_idx
-): 
-
+def update_critic(system_state: PPOSystemState, returns, mb_idx):
     states = jnp.squeeze(system_state.train_buffer.states)[mb_idx]
     returns = returns[mb_idx]
-    
+
     critic_optimiser_state = system_state.optimiser_states.critic_state
     critic_params = system_state.network_params.critic_params
     # policy hidden states should only be the first one of each chunk
-    critic_hidden_states = jnp.squeeze(system_state.train_buffer.critic_hidden_states, axis=(2, 3))[mb_idx]
+    critic_hidden_states = jnp.squeeze(
+        system_state.train_buffer.critic_hidden_states, axis=(2, 3)
+    )[mb_idx]
 
     grads = jax.grad(critic_loss)(
-        critic_params, 
+        critic_params,
         critic_hidden_states,
-        states, 
+        states,
         returns,
     )
 
-    updates, new_critic_optimiser_state = critic_optimiser.update(grads, critic_optimiser_state)
+    updates, new_critic_optimiser_state = critic_optimiser.update(
+        grads, critic_optimiser_state
+    )
     new_critic_params = optax.apply_updates(critic_params, updates)
 
     system_state.optimiser_states.critic_state = new_critic_optimiser_state
@@ -369,132 +384,135 @@ def update_critic(
 
     return system_state
 
-global_step = 0
-episode = 0 
-log_data = {}
-while global_step < 200_000: 
 
-    done = False 
+global_step = 0
+episode = 0
+log_data = {}
+while global_step < 200_000:
+    done = False
     obs = env.reset()
     episode_return = 0
-    episode_step = 0 
+    episode_step = 0
     start_time = time.time()
 
-    # Reset hidden states when new episode starts. 
+    # Reset hidden states when new episode starts.
     system_state.network_params.policy_hidden_state = policy_init_state_fn.apply(None)
     system_state.network_params.critic_hidden_state = critic_init_state_fn.apply(None)
 
-    while not done: 
-        
+    while not done:
         logits, new_policy_hidden_state = policy_network.apply(
-            system_state.network_params.policy_params, 
-            obs, 
-            system_state.network_params.policy_hidden_state,)
-        
+            system_state.network_params.policy_params,
+            obs,
+            system_state.network_params.policy_hidden_state,
+        )
+
         new_policy_hidden_state = jnp.expand_dims(new_policy_hidden_state[0], axis=0)
         actors_key = system_state.actors_key
         actors_key, action, logprob, entropy = choose_action(logits, actors_key)
         system_state.actors_key = actors_key
 
         value, new_critic_hidden_state = critic_network.apply(
-            system_state.network_params.critic_params, 
-            obs, 
-            system_state.network_params.critic_hidden_state,)
+            system_state.network_params.critic_params,
+            obs,
+            system_state.network_params.critic_hidden_state,
+        )
         value = jnp.squeeze(value)
         new_critic_hidden_state = jnp.expand_dims(new_critic_hidden_state[0], axis=0)
 
-        # Covert action to int in order to step the env. 
+        # Covert action to int in order to step the env.
         # Can also handle in the wrapper
         obs_, reward, done, _ = env.step(action.tolist())
-        global_step += 1 # TODO: With vec envs this should be more. 
-        
-        # NB: Correct shapes here. 
+        global_step += 1  # TODO: With vec envs this should be more.
+
+        # NB: Correct shapes here.
         data = BufferData(
-            state = add_two_leading_dims(obs), 
-            action = add_two_leading_dims(action), 
-            reward = add_two_leading_dims(reward), 
-            done = add_two_leading_dims(done), 
-            log_prob = add_two_leading_dims(logprob), 
-            value = add_two_leading_dims(value), 
-            entropy = add_two_leading_dims(entropy), 
-            policy_hidden_state = add_two_leading_dims(system_state.network_params.policy_hidden_state),
-            critic_hidden_state = add_two_leading_dims(system_state.network_params.critic_hidden_state),
+            state=add_two_leading_dims(obs),
+            action=add_two_leading_dims(action),
+            reward=add_two_leading_dims(reward),
+            done=add_two_leading_dims(done),
+            log_prob=add_two_leading_dims(logprob),
+            value=add_two_leading_dims(value),
+            entropy=add_two_leading_dims(entropy),
+            policy_hidden_state=add_two_leading_dims(
+                system_state.network_params.policy_hidden_state
+            ),
+            critic_hidden_state=add_two_leading_dims(
+                system_state.network_params.critic_hidden_state
+            ),
         )
 
-        # This is done so we store the current hidden state. 
+        # This is done so we store the current hidden state.
         system_state.network_params.policy_hidden_state = new_policy_hidden_state
         system_state.network_params.critic_hidden_state = new_critic_hidden_state
 
-        buffer_state = system_state.buffer 
+        buffer_state = system_state.buffer
         # buffer_state = add(buffer_state, data)
         buffer_state = jit_add(buffer_state, data)
         system_state.buffer = buffer_state
 
-        obs = obs_ 
+        obs = obs_
         episode_return += reward
         episode_step += 1
-        
-        # STEPS FOR UPDATING: 
-        # 1. Compute advantage and returns 
-        # 2. Split into recurrent chunks 
-        # 3. Epoch + Minibatch over recurrent chunks 
 
-        if global_step % (HORIZON + 1) == 0: 
-            
+        # STEPS FOR UPDATING:
+        # 1. Compute advantage and returns
+        # 2. Split into recurrent chunks
+        # 3. Epoch + Minibatch over recurrent chunks
+
+        if global_step % (HORIZON + 1) == 0:
             advantages = rlax.truncated_generalized_advantage_estimation(
-                r_t = jnp.squeeze(system_state.buffer.rewards)[:-1],
-                discount_t = (1 - jnp.squeeze(system_state.buffer.dones))[:-1] * DISCOUNT_GAMMA,
-                lambda_ = GAE_LAMBDA, 
-                values = jnp.squeeze(system_state.buffer.values),
-                stop_target_gradients=True
+                r_t=jnp.squeeze(system_state.buffer.rewards)[:-1],
+                discount_t=(1 - jnp.squeeze(system_state.buffer.dones))[:-1]
+                * DISCOUNT_GAMMA,
+                lambda_=GAE_LAMBDA,
+                values=jnp.squeeze(system_state.buffer.values),
+                stop_target_gradients=True,
             )
 
             advantages = jax.lax.stop_gradient(advantages)
-            # Just not sure how to index the values here. 
+            # Just not sure how to index the values here.
             returns = advantages + jnp.squeeze(system_state.buffer.values)[:-1]
             returns = jax.lax.stop_gradient(returns)
-            
+
             # Split all items in buffer into chunks
-            # Work out num chunks as 
-            num_chunks = int(HORIZON / RECURRENT_CHUNK_LENGTH) 
+            # Work out num chunks as
+            num_chunks = int(HORIZON / RECURRENT_CHUNK_LENGTH)
 
             # Need to reshape advantages and returns as well
-            # NOTE make sure the gradients are stopped after reshaping. 
-            advantages = jnp.array(
-                jnp.split(advantages, num_chunks)
-            )
-            returns = jnp.array(
-                jnp.split(returns, num_chunks)
+            # NOTE make sure the gradients are stopped after reshaping.
+            advantages = jnp.array(jnp.split(advantages, num_chunks))
+            returns = jnp.array(jnp.split(returns, num_chunks))
+
+            # Using a different buffer for training.
+            # Check that this gets reset properly.
+            system_state.train_buffer = split_buffer_into_chunks(
+                system_state.buffer, num_chunks=num_chunks
             )
 
-            # Using a different buffer for training. 
-            # Check that this gets reset properly. 
-            system_state.train_buffer = split_buffer_into_chunks(system_state.buffer, num_chunks=num_chunks)
-
-            # NEXT STEPS: WRITE LOSS FUNCTIONS. 
+            # NEXT STEPS: WRITE LOSS FUNCTIONS.
 
             for _ in range(NUM_EPOCHS):
-                
-                # Create data minibatches 
-                # Generate random numbers 
-                networks_key, sample_idx_key = jax.random.split(system_state.networks_key)
-                # TODO: Fix key placement bug in other implemnetations. 
+                # Create data minibatches
+                # Generate random numbers
+                networks_key, sample_idx_key = jax.random.split(
+                    system_state.networks_key
+                )
+                # TODO: Fix key placement bug in other implemnetations.
                 system_state.networks_key = networks_key
 
-                idxs = jax.random.permutation(key = sample_idx_key, x=num_chunks)
+                idxs = jax.random.permutation(key=sample_idx_key, x=num_chunks)
                 mb_idxs = jnp.split(idxs, NUM_MINIBATCHES)
-                
+
                 for mb_idx in mb_idxs:
                     system_state = update_policy(system_state, advantages, mb_idx)
                     system_state = update_critic(system_state, returns, mb_idx)
-            
-            
-            buffer_state = reset_buffer(buffer_state) 
+
+            buffer_state = reset_buffer(buffer_state)
             system_state.buffer = buffer_state
-    
+
     sps = episode_step / (time.time() - start_time)
 
-    if LOG: 
+    if LOG:
         log_data["episode"] = episode
         log_data["episode_return"] = episode_return
         log_data["global_step"] = global_step
@@ -502,8 +520,10 @@ while global_step < 200_000:
         logger.write(logging_details=log_data)
 
     episode += 1
-    if episode % 10 == 0: 
-        print(f"EPISODE: {episode}, GLOBAL_STEP: {global_step}, EPISODE_RETURN: {episode_return}")   
+    if episode % 10 == 0:
+        print(
+            f"EPISODE: {episode}, GLOBAL_STEP: {global_step}, EPISODE_RETURN: {episode_return}"
+        )
 
-if LOG: 
-    logger.close()  
+if LOG:
+    logger.close()
