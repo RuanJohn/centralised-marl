@@ -34,27 +34,27 @@ import gym
 jit_add = jax.jit(add)
 
 # Constants: 
-HORIZON = 200 
+HORIZON = 104 * 8 
 CLIP_EPSILON = 0.2 
 POLICY_LR = 0.005
 CRITIC_LR = 0.005
 DISCOUNT_GAMMA = 0.99 
 GAE_LAMBDA = 0.95
 NUM_EPOCHS = 3
-NUM_MINIBATCHES = 8 
+NUM_MINIBATCHES = 8 * 8 
 MAX_GLOBAL_NORM = 0.5
 ADAM_EPS = 1e-5
 POLICY_LAYER_SIZES = [64, 64]
 CRITIC_LAYER_SIZES = [64, 64]
 
 # TODO: Add agent IDS. 
-ADD_ONE_HOT_IDS = False
-ENV_NAME = "ma_gym:Switch4-v0"
+ADD_ONE_HOT_IDS = True
+ENV_NAME = "ma_gym:Switch2-v0"
 MASTER_PRNGKEY = jax.random.PRNGKey(2022)
 MASTER_PRNGKEY, networks_key, actors_key, buffer_key = jax.random.split(MASTER_PRNGKEY, 4)
 
 NORMALISE_ADVANTAGE = True
-ADD_ENTROPY_LOSS = False
+ADD_ENTROPY_LOSS = True
 
 ALGORITHM = "ff_ippo_batched"
 LOG = False
@@ -208,8 +208,6 @@ def policy_loss(
     if ADD_ENTROPY_LOSS: 
         loss -= 0.01 * jnp.mean(entropies_)
 
-    # jax.debug.print("policy loss {x}", x= loss)
-
     return loss
 
 def critic_loss(
@@ -221,7 +219,6 @@ def critic_loss(
     new_values = jnp.squeeze(critic_network.apply(critic_params, states))
     
     loss = 0.5 * ((new_values - returns) ** 2).mean()
-    # jax.debug.print("critic loss {x}", x= loss)
     return loss
 
 batched_policy_loss = jax.vmap(policy_loss, in_axes=(None, 1, 1, 1, 1, 1))
@@ -306,38 +303,32 @@ def update_critic(
 
     return system_state
 
-# NOTE: Can terminate episode if one agent is done. Doesn't have to be all agents. 
-
 def minibatch_update(carry, mb_idx):
 
-    system_state = carry[0]
-    advantages = carry[1]
-    returns = carry[2]
+    system_state, advantages, returns = carry
 
     system_state = update_policy(system_state, advantages, mb_idx)
     system_state = update_critic(system_state, returns, mb_idx)
 
     return (system_state, advantages, returns), mb_idx
 
+@jax.jit
+@chex.assert_max_traces(n=1)
 def epoch_update(carry, none_in): 
 
-    system_state = carry[0]
-    advantages = carry[1]
-    returns = carry[2]
+    system_state, advantages, returns = carry
 
-    networks_key, sample_idx_key = jax.random.split(system_state.networks_key)
-    system_state.networks_key = networks_key
+    system_state.networks_key, sample_idx_key = jax.random.split(system_state.networks_key)
 
     idxs = jax.random.permutation(key = sample_idx_key, x=HORIZON)
     mb_idxs = jnp.split(idxs, NUM_MINIBATCHES)
     
     # Minibatch update 
-    update_scan_out, _ = jax.lax.scan(
+    (system_state, _, _), _ = jax.lax.scan(
         f=minibatch_update, 
         init=(system_state, advantages, returns), 
-        xs=mb_idxs, 
+        xs=mb_idxs,
     )
-    system_state = update_scan_out[0]
 
     return (system_state, advantages, returns), none_in
 
@@ -384,11 +375,7 @@ while global_step < 200_000:
             value = jnp.expand_dims(act_values, axis=0), 
             entropy = jnp.expand_dims(act_entropies, axis=0)
         )
-
-        buffer_state = system_state.buffer 
-        buffer_state = jit_add(buffer_state, data)
-        # buffer_state = add(buffer_state, data)
-        system_state.buffer = buffer_state
+        system_state.buffer = jit_add(system_state.buffer, data)
 
         obs = obs_ 
         episode_return += jnp.sum(jnp.array(reward, dtype=jnp.float32))
@@ -396,30 +383,9 @@ while global_step < 200_000:
         
         if global_step % (HORIZON + 1) == 0: 
             
-            advantages = jnp.empty_like(jnp.squeeze(system_state.buffer.rewards)[:-1], dtype=jnp.float32)
-            returns = jnp.empty_like(jnp.squeeze(system_state.buffer.rewards)[:-1], dtype=jnp.float32)
-
             rewards_batch = jnp.squeeze(system_state.buffer.rewards)[:-1]
             dones_batch = jnp.squeeze(system_state.buffer.dones)[:-1]
             values_batch = jnp.squeeze(system_state.buffer.values)
-
-            # for agent in range(num_agents): 
-                
-            #     advantage = rlax.truncated_generalized_advantage_estimation(
-            #         r_t = jnp.squeeze(system_state.buffer.rewards[:,:,agent])[:-1],
-            #         discount_t = (1 - jnp.squeeze(system_state.buffer.dones[:,:,agent]))[:-1] * DISCOUNT_GAMMA,
-            #         lambda_ = GAE_LAMBDA, 
-            #         values = jnp.squeeze(system_state.buffer.values[:,:,agent]),
-            #         stop_target_gradients=True
-            #     )
-
-            #     advantage = jax.lax.stop_gradient(advantage)
-            #     # Just not sure how to index the values here. 
-            #     return_ = advantage + jnp.squeeze(system_state.buffer.values[:,:,agent])[:-1]
-            #     return_ = jax.lax.stop_gradient(return_)
-
-            #     advantages = advantages.at[:, agent].set(advantage)
-            #     returns = returns.at[:, agent].set(return_)
 
             advantages = batched_gae(
                 rewards_batch, 
@@ -433,35 +399,14 @@ while global_step < 200_000:
             advantages = jax.lax.stop_gradient(advantages)
             returns = jax.lax.stop_gradient(returns)
 
-            # TODO: 
-            # 1. VMAP over advantage and return calculations
-            # 2. Scan the epoch update
-            # 3. Scan / vmap over agents in the loss. 
-
             (system_state, _, _), _ = jax.lax.scan(
                 f=epoch_update, 
                 init=(system_state, advantages, returns),
                 xs=None,  
                 length=NUM_EPOCHS, 
-            )
-            
-            # for _ in range(NUM_EPOCHS):
-                
-            #     # Create data minibatches 
-            #     # Generate random numbers 
-            #     networks_key, sample_idx_key = jax.random.split(system_state.networks_key)
-            #     system_state.actors_key = networks_key
+            )   
 
-            #     idxs = jax.random.permutation(key = sample_idx_key, x=HORIZON)
-            #     mb_idxs = jnp.split(idxs, NUM_MINIBATCHES)
-
-            #     for mb_idx in mb_idxs:
-            #         system_state = update_policy(system_state, advantages, mb_idx)
-            #         system_state = update_critic(system_state, returns, mb_idx)
-                
-                
-            buffer_state = reset_buffer(buffer_state) 
-            system_state.buffer = buffer_state
+            system_state.buffer = reset_buffer(buffer_state) 
 
     sps = episode_step / (time.time() - start_time)
 
