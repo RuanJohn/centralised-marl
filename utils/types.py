@@ -44,6 +44,7 @@ class NetworkParams:
     critic_hidden_state: Optional[Any] = None 
     policy_init_state: Optional[Any] = None 
     critic_init_state: Optional[Any] = None
+    w: Optional[float] = None
 
 @chex.dataclass
 class OptimiserStates: 
