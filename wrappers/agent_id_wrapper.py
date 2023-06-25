@@ -1,5 +1,6 @@
-import numpy as np 
+import numpy as np
 import gym
+
 
 class AgentIDWrapper(gym.Env):
     def __init__(self, env):
@@ -13,7 +14,12 @@ class AgentIDWrapper(gym.Env):
         self._grid_shape = env._grid_shape
 
     def _add_agent_id_to_observation(self, observations):
-        return np.array([np.concatenate((self.agent_id_encoding[i], obs)) for i, obs in enumerate(observations)])
+        return np.array(
+            [
+                np.concatenate((self.agent_id_encoding[i], obs))
+                for i, obs in enumerate(observations)
+            ]
+        )
 
     def reset(self):
         observations = self.env.reset()
@@ -24,7 +30,7 @@ class AgentIDWrapper(gym.Env):
         next_observations = self._add_agent_id_to_observation(next_observations)
         return next_observations, rewards, dones, infos
 
-    def render(self, mode='human'):
+    def render(self, mode="human"):
         return self.env.render(mode)
 
     def close(self):
